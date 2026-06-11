@@ -9,7 +9,6 @@ Privacy rule:
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from aiogram import Bot
 
@@ -49,8 +48,8 @@ async def notify_signup(
         if ref.level == 1:
             text = (
                 "✦ <b>Новый пользователь по вашей ссылке</b>\n\n"
-                f"Кто-то присоединился к Buildo по вашей реферальной ссылке.\n"
-                f"Когда он оплатит подписку — вы получите 30% от суммы."
+                "Кто-то присоединился к Buildo по вашей реферальной ссылке.\n"
+                "Когда он оплатит подписку — вы получите 30% от суммы."
             )
         else:
             text = (
@@ -80,7 +79,7 @@ async def notify_signup(
         f"tg_user_id: <code>{new_user_tg_id}</code>\n"
         f"Реф-код: <code>{ref_code}</code>\n"
         f"Цепь рефереров:\n{chain_text}\n\n"
-        f"🔗 <a href=\"tg://user?id={new_user_tg_id}\">Открыть в Telegram</a>"
+        f'🔗 <a href="tg://user?id={new_user_tg_id}">Открыть в Telegram</a>'
     )
     await _send(bot, s.admin_telegram_id, admin_text)
 
@@ -133,7 +132,7 @@ async def notify_payment(
         f"Сумма: <b>{amount_rub:.0f}₽</b>\n"
         f"Описание: {description}\n\n"
         f"Цепь комиссий:\n{chain_text}\n\n"
-        f"🔗 <a href=\"tg://user?id={paying_user_tg_id}\">Открыть в Telegram</a>"
+        f'🔗 <a href="tg://user?id={paying_user_tg_id}">Открыть в Telegram</a>'
     )
     await _send(bot, s.admin_telegram_id, admin_text)
 

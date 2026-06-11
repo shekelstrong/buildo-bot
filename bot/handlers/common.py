@@ -17,7 +17,6 @@ from aiogram.types import (
     Message,
 )
 
-from bot.config import get_settings
 from bot.services import notifications
 from bot.services.referral import record_signup
 from bot.services.scenes import get_scene

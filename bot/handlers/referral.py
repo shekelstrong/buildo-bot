@@ -77,11 +77,7 @@ async def cmd_referral(message: Message) -> None:
         text,
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="📤 Поделиться ссылкой", url=share_url
-                    )
-                ],
+                [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=share_url)],
                 [InlineKeyboardButton(text="📋 В меню", callback_data="menu:home")],
             ]
         ),
