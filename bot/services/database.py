@@ -278,6 +278,21 @@ async def list_user_sites(tg_user_id: int, limit: int = 20) -> list[dict[str, An
         return []
 
 
+async def delete_site(site_id: str) -> bool:
+    """Hard-delete a site row. Use with care (cascades to versions)."""
+    pool = await get_pool()
+    if pool is None:
+        return False
+    try:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("DELETE FROM sites WHERE id = %s", (site_id,))
+                return cur.rowcount > 0
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("delete_site failed: %s", exc)
+        return False
+
+
 async def redeploy_site(site_id: str) -> bool:
     pool = await get_pool()
     if pool is None:

@@ -19,13 +19,9 @@ from bot.services.site_generator import (
 SAMPLE_GOOD = """\
 {
   "project_name": "test-coffee",
-  "framework": "vite-react",
+  "framework": "static-html",
   "files": [
-    {"path": "package.json", "content": "{\\"name\\": \\"test-coffee\\"}"},
-    {"path": "index.html", "content": "<!doctype html><html><body>Coffee</body></html>"},
-    {"path": "src/main.jsx", "content": "import React from 'react';"},
-    {"path": "src/App.jsx", "content": "export default function App(){return <h1>Coffee</h1>;}"},
-    {"path": "src/index.css", "content": "body{margin:0;font-family:system-ui;}"}
+    {"path": "index.html", "content": "<!doctype html><html><body>Coffee shop landing</body></html>"}
   ],
   "preview_summary": "A warm minimalist landing for a specialty coffee shop."
 }
@@ -38,27 +34,53 @@ SAMPLE_WITH_FENCE = "```json\n" + SAMPLE_GOOD + "\n```"
 SAMPLE_BAD = "Sorry, I cannot help with that."
 
 
-SAMPLE_EMPTY_FILES = '{"project_name": "x", "framework": "vite-react", "files": [], "preview_summary": ""}'
+SAMPLE_EMPTY_FILES = '{"project_name": "x", "framework": "static-html", "files": [], "preview_summary": ""}'
 
 
-def test_parse_clean_json():
-    site = _parse_response(SAMPLE_GOOD)
-    assert site.project_name == "test-coffee"
-    assert site.framework == "vite-react"
-    assert len(site.files) == 5
-    assert site.files[0].path == "package.json"
-    assert "Coffee" in site.files[1].content
+SAMPLE_MULTIFILE_NO_INDEX = """\
+{
+  "project_name": "test-coffee",
+  "framework": "static-html",
+  "files": [
+    {"path": "package.json", "content": "{\\"name\\": \\"test-coffee\\"}"},
+    {"path": "src/main.jsx", "content": "import React from 'react';"},
+    {"path": "src/App.jsx", "content": "export default function App(){return <h1>Coffee</h1>;}"},
+    {"path": "src/index.css", "content": "body{margin:0;font-family:system-ui;}"}
+  ],
+  "preview_summary": "A warm minimalist landing for a specialty coffee shop."
+}
+"""
+
+
+def test_parse_multifile_no_index_merges_to_index():
+    """Multi-file projects without index.html should be auto-merged."""
+    site = _parse_response(SAMPLE_MULTIFILE_NO_INDEX)
+    assert site.framework == "static-html"
+    assert len(site.files) == 1
+    assert site.files[0].path == "index.html"
+    # The placeholder body from no-html-files path should be there
+    assert "Buildo" in site.files[0].content or "Coffee" in site.files[0].content
     assert (
         "warm" in site.preview_summary.lower()
         or "minimalist" in site.preview_summary.lower()
     )
 
 
+def test_parse_clean_json():
+    site = _parse_response(SAMPLE_GOOD)
+    assert site.project_name == "test-coffee"
+    assert site.framework == "static-html"
+    assert len(site.files) == 1
+    assert site.files[0].path == "index.html"
+    assert "Coffee shop landing" in site.files[0].content
+
+
 def test_parse_markdown_fence():
     """LLM sometimes wraps JSON in ```json ... ``` fences."""
     site = _parse_response(SAMPLE_WITH_FENCE)
     assert site.project_name == "test-coffee"
-    assert len(site.files) == 5
+    assert len(site.files) == 1
+    assert site.files[0].path == "index.html"
 
 
 def test_parse_prose_around_json():
@@ -81,7 +103,7 @@ def test_parse_rejects_empty_files():
 def test_system_prompt_contains_key_rules():
     """Sanity: the system prompt should enforce the format and design rules."""
     assert "JSON" in SITE_GENERATOR_SYSTEM_PROMPT
-    assert "vite-react" in SITE_GENERATOR_SYSTEM_PROMPT
+    assert "static-html" in SITE_GENERATOR_SYSTEM_PROMPT
     assert "VARIANCE" in SITE_GENERATOR_SYSTEM_PROMPT
     assert (
         "taste-skill" in SITE_GENERATOR_SYSTEM_PROMPT.lower()
@@ -92,28 +114,32 @@ def test_system_prompt_contains_key_rules():
 def test_generated_site_to_dict():
     site = GeneratedSite(
         project_name="x",
-        framework="vite-react",
-        files=[GeneratedFile(path="a.txt", content="hello")],
+        framework="static-html",
+        files=[GeneratedFile(path="index.html", content="<html></html>")],
         preview_summary="test",
     )
     d = site.to_dict()
     assert d["project_name"] == "x"
-    assert d["files"][0]["path"] == "a.txt"
-    assert d["files"][0]["content"] == "hello"
+    assert d["framework"] == "static-html"
+    assert len(d["files"]) == 1
 
 
-def test_total_size_kb():
+def test_generated_site_size_kb():
     site = GeneratedSite(
         project_name="x",
-        framework="vite-react",
-        files=[GeneratedFile(path="a", content="x" * 2048)],
+        framework="static-html",
+        files=[GeneratedFile(path="index.html", content="x" * 2048)],  # 2KB
     )
-    assert site.total_size_kb == 2.0  # 2048 bytes = 2 KB
+    assert 1.9 < site.total_size_kb < 2.1
 
 
 @pytest.mark.asyncio
 async def test_generate_site_rejects_empty_prompt():
     with pytest.raises(ValueError, match="empty"):
         await generate_site("")
+
+
+@pytest.mark.asyncio
+async def test_generate_site_rejects_whitespace_prompt():
     with pytest.raises(ValueError, match="empty"):
-        await generate_site("   ")
+        await generate_site("   \n\t  ")

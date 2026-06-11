@@ -1,16 +1,17 @@
 """/site — site-builder flow with preview, agent, and time-travel.
 
 Flow:
-  /site     -> ask prompt
-  [prompt]  -> generate via LLM
-            -> auto-deploy preview
-            -> show URL + "Исправить / Готово / Удалить"
-  [edit]    -> in 'editing' state: agent applies change, re-deploys
-            -> shows diff summary + new URL
-  /done     -> publish (mark as deployed in DB)
-  /cancel   -> abort, clean up
+  /site          -> ask prompt
+  [prompt]       -> generate via LLM
+                 -> auto-deploy preview
+                 -> show URL + inline buttons [Исправить / Готово / Удалить / Версии]
+  [edit]         -> in 'editing' state: agent applies change, re-deploys
+                 -> shows diff summary + new URL + "В меню" button
+  [Done button]  -> publish (mark as deployed in DB)
+  [Menu button]  -> exit editing, back to main menu
+  /cancel        -> abort, clean up
 
-Time travel: every deploy creates v1, v2, v3... User can roll back via /versions
+Time travel: every deploy creates v1, v2, v3... User can roll back via /versions or [Версии] button
 """
 
 from __future__ import annotations
@@ -18,11 +19,17 @@ from __future__ import annotations
 import logging
 import uuid
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
+from typing import cast
 
 from bot.services import database, preview, supabase
 from bot.services.agent import apply_edit
@@ -41,13 +48,58 @@ class SiteFlow(StatesGroup):
     editing = State()
 
 
-# Callback data
-CB_EDIT = "site:edit"
-CB_DONE = "site:done"
-CB_DELETE = "site:delete"
-CB_CANCEL = "site:cancel"
-CB_VERSIONS = "site:versions"
-CB_ROLLBACK_PREFIX = "site:rollback:"
+# Callback data (max 64 bytes per Telegram spec)
+CB_EDIT = "sb:edit"
+CB_DONE = "sb:done"
+CB_DELETE = "sb:delete"
+CB_MENU = "sb:menu"
+CB_VERSIONS = "sb:versions"
+CB_RETRY = "sb:retry"
+CB_ROLLBACK_PREFIX = "sb:rb:"
+
+
+def _preview_keyboard() -> InlineKeyboardMarkup:
+    """Inline buttons for site-preview state."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✏️ Исправить", callback_data=CB_EDIT),
+                InlineKeyboardButton(text="✅ Готово", callback_data=CB_DONE),
+            ],
+            [
+                InlineKeyboardButton(text="🕒 Версии", callback_data=CB_VERSIONS),
+                InlineKeyboardButton(text="🗑 Удалить", callback_data=CB_DELETE),
+            ],
+            [InlineKeyboardButton(text="📋 В меню", callback_data=CB_MENU)],
+        ]
+    )
+
+
+def _editing_keyboard() -> InlineKeyboardMarkup:
+    """Inline buttons for editing state — always shows 'В меню'."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Готово", callback_data=CB_DONE),
+                InlineKeyboardButton(text="🕒 Версии", callback_data=CB_VERSIONS),
+            ],
+            [InlineKeyboardButton(text="🗑 Удалить", callback_data=CB_DELETE)],
+            [InlineKeyboardButton(text="📋 В меню", callback_data=CB_MENU)],
+        ]
+    )
+
+
+def _versions_keyboard(versions: list[dict], current_version: str) -> InlineKeyboardMarkup:
+    """Inline buttons for Time Travel — one per version."""
+    rows = []
+    for v in versions[:8]:  # max 8 buttons (Telegram limit)
+        ver = v.get("version", "?")
+        marker = " ←" if ver == current_version else ""
+        rows.append(
+            [InlineKeyboardButton(text=f"⏪ {ver}{marker}", callback_data=f"{CB_ROLLBACK_PREFIX}{ver}")]
+        )
+    rows.append([InlineKeyboardButton(text="📋 В меню", callback_data=CB_MENU)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 @router.message(Command("site"))
@@ -56,7 +108,7 @@ async def cmd_site(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(SiteFlow.waiting_for_prompt)
     await message.answer(
-        "🚀 <b>Создаём новый сайт</b>\n\n"
+        "✦ <b>Создаём новый сайт</b>\n\n"
         "Опиши словами, что нужно сделать. Чем подробнее — тем точнее результат.\n\n"
         "Примеры:\n"
         "<i>«лендинг для кофейни в центре Москвы, тёплый минимализм, "
@@ -71,12 +123,187 @@ async def cmd_site(message: Message, state: FSMContext) -> None:
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
     """Cancel current flow."""
     await state.clear()
-    await message.answer("Окей, отменил. /site — начать заново.")
+    await message.answer("✦ Отменил. /site — начать заново.")
+
+
+@router.callback_query(F.data == CB_MENU)
+async def cb_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    """Exit to main menu (cancel current site flow)."""
+    await state.clear()
+    if callback.message:
+        try:
+            await cast(Message, callback.message).edit_text(
+                "✦ <b>Главное меню</b>\n\n"
+                "• /site — создать сайт\n"
+                "• /sites — мои сайты\n"
+                "• /help — помощь"
+            )
+        except Exception:  # noqa: BLE001
+            await cast(Message, callback.message).answer(
+                "✦ <b>Главное меню</b>\n\n"
+                "• /site — создать сайт\n"
+                "• /sites — мои сайты\n"
+                "• /help — помощь"
+            )
+    await callback.answer("Вернулся в меню")
+
+
+@router.callback_query(F.data == CB_DONE)
+async def cb_done(callback: CallbackQuery, state: FSMContext) -> None:
+    """Finish editing and publish site as final."""
+    data = await state.get_data()
+    site_id = data.get("site_id")
+    tg_id = callback.from_user.id if callback.from_user else None
+    if site_id and tg_id:
+        try:
+            await database.update_site_status(
+                site_id, "published", deploy_url=data.get("preview_url", "")
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("publish failed")
+    await state.clear()
+    if callback.message:
+        try:
+            await cast(Message, callback.message).edit_text(
+                "✦ <b>Готово!</b>\n\n"
+                f"Сайт опубликован: {data.get('preview_url', '—')}\n\n"
+                "/site — создать ещё\n"
+                "/sites — мои сайты"
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    await callback.answer("Опубликовано!")
+
+
+@router.callback_query(F.data == CB_DELETE)
+async def cb_delete(callback: CallbackQuery, state: FSMContext) -> None:
+    """Delete current site from disk and DB."""
+    data = await state.get_data()
+    site_id = data.get("site_id")
+    tg_id = callback.from_user.id if callback.from_user else 0
+    if site_id:
+        try:
+            await database.delete_site(site_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("delete_site failed")
+        # Also remove from disk
+        try:
+            import shutil
+            from pathlib import Path
+
+            site_path = Path.home() / "buildo-sites" / str(tg_id) / site_id
+            if site_path.exists():
+                shutil.rmtree(site_path, ignore_errors=True)
+            public_path = Path.home() / "buildo-sites" / "public" / str(tg_id) / site_id
+            if public_path.exists():
+                shutil.rmtree(public_path, ignore_errors=True)
+        except Exception:  # noqa: BLE001
+            logger.exception("disk cleanup failed")
+    await state.clear()
+    if callback.message:
+        try:
+            await cast(Message, callback.message).edit_text(
+                "🗑 <b>Удалено.</b>\n\n/site — создать новый\n/sites — мои сайты"
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    await callback.answer("Удалено")
+
+
+@router.callback_query(F.data == CB_EDIT)
+async def cb_edit(callback: CallbackQuery, state: FSMContext) -> None:
+    """Switch from preview to editing mode."""
+    await state.set_state(SiteFlow.editing)
+    if callback.message:
+        try:
+            await cast(Message, callback.message).edit_text(
+                "✏️ <b>Режим правок</b>\n\n"
+                "Пиши что изменить — я переделаю.\n"
+                "Например: <i>«поменяй hero на тёмный»</i>, <i>«добавь секцию с ценами»</i>, "
+                "<i>«сделай логотип больше»</i>\n\n"
+                "Каждое изменение = новая версия. Можно откатиться через 🕒 Версии.",
+                reply_markup=_editing_keyboard(),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    await callback.answer("Можно писать правки")
+
+
+@router.callback_query(F.data == CB_VERSIONS)
+async def cb_versions(callback: CallbackQuery, state: FSMContext) -> None:
+    """List saved versions with rollback buttons."""
+    data = await state.get_data()
+    site_id = data.get("site_id")
+    tg_id = callback.from_user.id if callback.from_user else 0
+    if not site_id:
+        await callback.answer("Нет активного сайта", show_alert=True)
+        return
+    versions = preview.list_versions(tg_id, site_id)
+    if not versions:
+        await callback.answer("Версий пока нет", show_alert=True)
+        return
+    lines = ["🕒 <b>Версии сайта:</b>\n"]
+    for v in versions:
+        saved = v.get("saved_at", "?")[:19]
+        marker = " ← текущая" if v.get("version") == data.get("current_version") else ""
+        lines.append(
+            f"• <b>{v.get('version', '?')}</b> · {v.get('files_count', 0)} файлов · {saved}{marker}"
+        )
+    lines.append("\nНажми кнопку ниже, чтобы откатиться.")
+    if callback.message:
+        try:
+            await cast(Message, callback.message).edit_text(
+                "\n".join(lines),
+                reply_markup=_versions_keyboard(versions, data.get("current_version", "")),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith(CB_ROLLBACK_PREFIX))
+async def cb_rollback(callback: CallbackQuery, state: FSMContext) -> None:
+    """Roll back to a specific version."""
+    target_version = callback.data.split(":", 2)[2] if callback.data else ""
+    data = await state.get_data()
+    site_id = data.get("site_id")
+    tg_id = callback.from_user.id if callback.from_user else 0
+    if not site_id or not target_version:
+        await callback.answer("Ошибка", show_alert=True)
+        return
+
+    files = preview.get_version_files(tg_id, site_id, target_version)
+    if not files:
+        await callback.answer(f"Версия {target_version} не найдена", show_alert=True)
+        return
+
+    result = await preview.deploy_preview(
+        tg_id, site_id, files, data.get("project_name", "")
+    )
+    if not result.success:
+        await callback.answer(f"Деплой упал: {result.error[:80]}", show_alert=True)
+        return
+
+    await state.update_data(
+        current_version=target_version,
+        current_files=files,
+        preview_url=result.url,
+    )
+    if callback.message:
+        try:
+            await cast(Message, callback.message).edit_text(
+                f"⏪ <b>Откатился к {target_version}</b>\n\n"
+                f"🌐 Превью: {result.url}",
+                reply_markup=_editing_keyboard(),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    await callback.answer(f"Версия {target_version}")
 
 
 @router.message(Command("done"))
 async def cmd_done(message: Message, state: FSMContext) -> None:
-    """Finish editing and publish site as final."""
+    """Same as CB_DONE but via command."""
     cur = await state.get_state()
     if cur != SiteFlow.editing.state:
         return
@@ -84,7 +311,6 @@ async def cmd_done(message: Message, state: FSMContext) -> None:
     site_id = data.get("site_id")
     tg_id = message.from_user.id if message.from_user else None
     if site_id and tg_id:
-        # mark as published
         try:
             await database.update_site_status(
                 site_id, "published", deploy_url=data.get("preview_url", "")
@@ -93,8 +319,7 @@ async def cmd_done(message: Message, state: FSMContext) -> None:
             logger.exception("publish failed")
     await state.clear()
     await message.answer(
-        "✅ <b>Готово!</b>\n\n"
-        f"Сайт опубликован: {data.get('preview_url', '—')}\n\n"
+        f"✦ <b>Готово!</b>\n\nСайт опубликован: {data.get('preview_url', '—')}\n\n"
         "/site — создать ещё\n/sites — мои сайты"
     )
 
@@ -108,8 +333,8 @@ async def receive_prompt(message: Message, state: FSMContext) -> None:
 
     prompt = message.text.strip()
     thinking = await message.answer(
-        f"🤖 Генерирую сайт...\n<i>{prompt[:150]}{'...' if len(prompt) > 150 else ''}</i>\n\n"
-        "Обычно 30-90 секунд."
+        f"✦ <b>Генерирую сайт...</b>\n\n<i>{prompt[:150]}{'...' if len(prompt) > 150 else ''}</i>\n\n"
+        "Обычно 15-40 секунд."
     )
 
     try:
@@ -117,7 +342,7 @@ async def receive_prompt(message: Message, state: FSMContext) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.exception("generate_site failed")
         await thinking.edit_text(
-            f"❌ Не получилось: <code>{exc}</code>\n\n"
+            f"✗ Не получилось: <code>{exc}</code>\n\n"
             "Попробуй переформулировать или /cancel."
         )
         await state.clear()
@@ -141,7 +366,7 @@ async def receive_prompt(message: Message, state: FSMContext) -> None:
                     files_count=len(site.files),
                     size_kb=site.total_size_kb,
                     preview_summary=site.preview_summary,
-                    deploy_target="layero",
+                    deploy_target="self-host",
                     deploy_url="",
                     prompt=prompt,
                     site_id=site_id,
@@ -163,7 +388,7 @@ async def receive_prompt(message: Message, state: FSMContext) -> None:
 
     if not result.success:
         await thinking.edit_text(
-            f"❌ Не получилось задеплоить: <code>{result.error[:200]}</code>\n\n"
+            f"✗ Не получилось задеплоить: <code>{result.error[:200]}</code>\n\n"
             "/cancel — отменить"
         )
         await state.clear()
@@ -190,20 +415,18 @@ async def receive_prompt(message: Message, state: FSMContext) -> None:
     file_list = "\n".join(f"  📄 {f.path}" for f in site.files[:10])
 
     await thinking.edit_text(
-        f"🎨 <b>Готово!</b>\n\n"
+        f"✦ <b>Готово!</b>\n\n"
         f"<i>{site.preview_summary}</i>\n\n"
         f"🌐 <b>Превью:</b> {result.url}\n\n"
         f"📁 Файлы ({len(site.files)}):\n{file_list}\n\n"
-        "Что дальше?\n"
-        "• Напиши что изменить — я переделаю\n"
-        "• /done — опубликовать\n"
-        "• /cancel — удалить черновик"
+        "Что дальше?",
+        reply_markup=_preview_keyboard(),
     )
 
 
 @router.message(SiteFlow.preview)
 async def receive_first_edit(message: Message, state: FSMContext) -> None:
-    """After preview, user can send an edit instruction."""
+    """After preview, user can send an edit instruction (text in dialog)."""
     if message.text is None or not message.text.strip():
         return
     # Transition to editing state and process
@@ -230,18 +453,22 @@ async def _apply_user_edit(message: Message, state: FSMContext) -> None:
     current_files: list[dict[str, str]] = data.get("current_files", [])
 
     if not site_id or not current_files:
-        await message.answer("❌ Не нашёл текущий сайт в памяти. Начни заново: /site")
+        await message.answer(
+            "✗ Не нашёл текущий сайт в памяти. Начни заново: /site",
+            reply_markup=None,
+        )
         await state.clear()
         return
 
-    thinking = await message.answer(f"✏️ Применяю: <i>{instruction[:200]}</i>")
+    thinking = await message.answer(f"✏️ <b>Применяю:</b> <i>{instruction[:200]}</i>")
 
     try:
         edit = await apply_edit(current_files, instruction)
     except Exception as exc:  # noqa: BLE001
         logger.exception("agent edit failed")
         await thinking.edit_text(
-            f"❌ Не получилось: <code>{exc}</code>\n\n" "Попробуй переформулировать."
+            f"✗ Не получилось: <code>{exc}</code>\n\nПопробуй переформулировать.",
+            reply_markup=_editing_keyboard(),
         )
         return
 
@@ -260,8 +487,9 @@ async def _apply_user_edit(message: Message, state: FSMContext) -> None:
 
     if not result.success:
         await thinking.edit_text(
-            f"❌ Edit применился, но деплой упал: <code>{result.error[:200]}</code>\n\n"
-            "Попробуй ещё раз."
+            f"✗ Edit применился, но деплой упал: <code>{result.error[:200]}</code>\n\n"
+            "Попробуй ещё раз.",
+            reply_markup=_editing_keyboard(),
         )
         return
 
@@ -279,10 +507,11 @@ async def _apply_user_edit(message: Message, state: FSMContext) -> None:
     )
 
     await thinking.edit_text(
-        f"✅ {edit.preview_message}\n\n"
+        f"✦ <b>{edit.preview_message}</b>\n\n"
         f"🌐 Новое превью: {result.url}\n\n"
         f"📝 {edit.summary}\n\n"
-        "Ещё что-то поменять? Пиши. Или /done — опубликовать."
+        "Ещё что-то поменять? Пиши.",
+        reply_markup=_editing_keyboard(),
     )
 
 
@@ -302,11 +531,15 @@ async def cmd_versions(message: Message, state: FSMContext) -> None:
     lines = ["🕒 <b>Версии сайта:</b>\n"]
     for v in versions:
         saved = v.get("saved_at", "?")[:19]
+        marker = " ← текущая" if v.get("version") == data.get("current_version") else ""
         lines.append(
-            f"• <b>{v.get('version', '?')}</b> · {v.get('files_count', 0)} файлов · {saved}"
+            f"• <b>{v.get('version', '?')}</b> · {v.get('files_count', 0)} файлов · {saved}{marker}"
         )
-    lines.append("\nЧтобы откатиться, напиши /rollback v2 (например)")
-    await message.answer("\n".join(lines))
+    lines.append("\n/rollback v2 — откатиться к версии (например)")
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=_versions_keyboard(versions, data.get("current_version", "")),
+    )
 
 
 @router.message(Command("rollback"))
@@ -328,15 +561,14 @@ async def cmd_rollback(message: Message, state: FSMContext) -> None:
 
     files = preview.get_version_files(tg_id, site_id, target_version)
     if not files:
-        await message.answer(f"❌ Версия {target_version} не найдена")
+        await message.answer(f"✗ Версия {target_version} не найдена")
         return
 
-    # Re-deploy
     result = await preview.deploy_preview(
         tg_id, site_id, files, data.get("project_name", "")
     )
     if not result.success:
-        await message.answer(f"❌ Деплой упал: {result.error[:200]}")
+        await message.answer(f"✗ Деплой упал: {result.error[:200]}")
         return
 
     await state.update_data(
@@ -345,7 +577,8 @@ async def cmd_rollback(message: Message, state: FSMContext) -> None:
         preview_url=result.url,
     )
     await message.answer(
-        f"⏪ Откатился к <b>{target_version}</b>\n\n" f"🌐 Превью: {result.url}"
+        f"⏪ Откатился к <b>{target_version}</b>\n\n🌐 Превью: {result.url}",
+        reply_markup=_editing_keyboard(),
     )
 
 
@@ -362,7 +595,7 @@ async def cmd_sites(message: Message) -> None:
             return
         user_id_raw = user.get("id") if isinstance(user, dict) else user["id"]
         if user_id_raw is None:
-            await message.answer("❌ Ошибка user_id")
+            await message.answer("✗ Ошибка user_id")
             return
         user_id = int(user_id_raw)
         sites = await supabase.list_user_sites(user_id, limit=20)
@@ -386,10 +619,7 @@ async def cmd_sites(message: Message) -> None:
         await message.answer("\n".join(lines))
     except Exception as exc:
         logger.exception("cmd_sites failed")
-        await message.answer(f"❌ Ошибка: <code>{exc}</code>")
-
-
-# ===== Static serving for built sites =====
+        await message.answer(f"✗ Ошибка: <code>{exc}</code>")
 
 
 @router.message(Command("static"))

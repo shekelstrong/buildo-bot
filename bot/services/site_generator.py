@@ -1,12 +1,18 @@
-"""Site generator — converts user prompt to deployable site code.
+"""Site generator — converts user prompt to deployable PURE STATIC site code.
 
 Pipeline:
     user_prompt -> taste-skill system prompt -> MiniMax M3 (Anthropic-compat)
                 -> parse code blocks -> {filename: content} dict
-                -> save to disk as React/Vite project
+                -> save to disk as HTML/CSS/JS (no build step required)
 
 This is the core of Buildo. Uses taste-skill v2 anti-slop design rules
 loaded as system prompt so generated sites are not "AI-default ugly".
+
+Why pure static (no Vite, no React, no npm):
+- Zero build step: no Node.js in container, no 90s npm install
+- Deploys in <5s, runs on Layero, GitHub Pages, anywhere
+- 1 file (index.html with inline CSS/JS) is easier to edit via AI agent
+- Future-proof: works even on cheapest static hosts
 """
 
 from __future__ import annotations
@@ -21,8 +27,7 @@ from bot.services.llm import chat
 logger = logging.getLogger(__name__)
 
 
-# taste-skill v2 anti-slop + Vite+React stack instructions
-# Loaded as system prompt for MiniMax M3
+# taste-skill v2 anti-slop + PURE STATIC stack (no build step)
 SITE_GENERATOR_SYSTEM_PROMPT = """\
 You are Buildo, an elite front-end engineer who designs AND ships landing pages.
 
@@ -30,18 +35,16 @@ OUTPUT FORMAT (strict, non-negotiable):
 - Reply with a JSON object (no prose, no markdown fences) of shape:
   {
     "project_name": "kebab-case-name",
-    "framework": "vite-react",
+    "framework": "static-html",
     "files": [
-      {"path": "package.json", "content": "..."},
-      {"path": "index.html", "content": "..."},
-      {"path": "src/main.jsx", "content": "..."},
-      {"path": "src/App.jsx", "content": "..."},
-      {"path": "src/index.css", "content": "..."},
-      {"path": "src/components/Hero.jsx", "content": "..."}
+      {"path": "index.html", "content": "..."}
     ],
     "preview_summary": "one-line description of what was built"
   }
 - No text outside the JSON. No markdown fences. The JSON must parse.
+- ALWAYS output a SINGLE file: index.html with inline <style> and <script>.
+  No external CSS files, no external JS files, no package.json.
+  This is by design — instant deploy, zero build, AI-agent-friendly.
 
 DESIGN PRINCIPLES (taste-skill v2):
 - Read the user's brief. Decide page kind (landing, portfolio, product) and audience.
@@ -52,19 +55,24 @@ DESIGN PRINCIPLES (taste-skill v2):
 - Hierarchy: ONE primary headline, real subhead, proof points, CTA, footer.
 - Mobile-first responsive. Use CSS grid and clamp() for type scale.
 - Use real content, not Lorem Ipsum. Russian or English to match user.
-- No emoji as icons. Use lucide-react or hand-rolled SVGs.
+- No emoji as icons. Use inline SVGs (lucide-style stroke icons).
+- Use Google Fonts via @import in <style>. DO NOT use local font files.
+- Add subtle scroll-reveal via IntersectionObserver (inline JS, no libraries).
+- Make CTA buttons visually obvious (high contrast, hover state, scale on hover).
 
-STACK:
-- Vite 5 + React 18 + plain CSS (no Tailwind by default; Tailwind only if user asks).
-- No TypeScript (keeps generated code simple to read and edit).
-- Package.json scripts: dev, build, preview.
-- Include a `vercel.json` rewrite for SPA (all -> /index.html).
+HTML STRUCTURE (single index.html):
+- <!doctype html> + <html lang="ru"> (or "en" if user wrote in English)
+- <head>: meta charset, viewport, title, <style> block, Google Fonts import
+- <body>: header/nav (sticky), hero, features (asymmetric, not 3-equal-cards), proof/social-proof, CTA, footer
+- One <script> block at bottom for: smooth scroll, IntersectionObserver reveal, any interactivity
+- Semantic HTML5: <header>, <main>, <section>, <footer>
+- Add basic SEO: <title>, <meta name="description">, og:title, og:description
 
 QUALITY BAR:
-- Code must RUN. `npm install && npm run build` must succeed.
+- Code must RUN. Just open index.html in a browser — that's it.
 - No placeholder comments. No TODO. No "..." truncations.
 - Single-page only. Multi-page sites are out of scope for one call.
-- Max 8 files per generation. If you need more, merge components.
+- Total file size: aim for 30-80KB of HTML (rich enough to look designed, small enough to render fast).
 """
 
 
@@ -104,21 +112,18 @@ _FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 def _parse_response(raw: str) -> GeneratedSite:
     """Parse MiniMax response into GeneratedSite. Robust to markdown fences."""
-    # Try direct JSON first
     text = raw.strip()
     parsed: dict | None = None
 
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
-        # Try to extract JSON from markdown fence
         m = _FENCE_RE.search(text)
         if m:
             try:
                 parsed = json.loads(m.group(1))
             except json.JSONDecodeError:
                 pass
-        # Try to find first { and last }
         if parsed is None:
             first = text.find("{")
             last = text.rfind("}")
@@ -143,21 +148,50 @@ def _parse_response(raw: str) -> GeneratedSite:
     if not files:
         raise ValueError("No valid file entries in LLM response")
 
+    # Enforce: must be static-html. Convert any non-HTML files to inline-into-index.
+    has_index = any(f.path == "index.html" for f in files)
+    if not has_index:
+        # Create a minimal index.html that includes all files
+        css = "\n".join(f.content for f in files if f.path.endswith(".css"))
+        js = "\n".join(f.content for f in files if f.path.endswith(".js"))
+        html_body = next(
+            (f.content for f in files if f.path.endswith(".html")), "<h1>Buildo site</h1>"
+        )
+        # If html_body is full document, strip doctype/head
+        if "<body" in html_body:
+            import re as _re
+
+            body_match = _re.search(r"<body[^>]*>(.*?)</body>", html_body, _re.DOTALL)
+            if body_match:
+                html_body = body_match.group(1)
+
+        merged = f"""<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Buildo</title>
+  <style>{css}</style>
+</head>
+<body>{html_body}<script>{js}</script></body>
+</html>"""
+        files = [GeneratedFile(path="index.html", content=merged)]
+
     return GeneratedSite(
         project_name=str(parsed.get("project_name", "buildo-site")),
-        framework=str(parsed.get("framework", "vite-react")),
+        framework="static-html",
         files=files,
         preview_summary=str(parsed.get("preview_summary", "")),
     )
 
 
-async def generate_site(prompt: str, *, max_tokens: int = 16000) -> GeneratedSite:
-    """Generate a complete deployable site from a user prompt.
+async def generate_site(prompt: str, *, max_tokens: int = 32000) -> GeneratedSite:
+    """Generate a complete deployable static site from a user prompt.
 
     Args:
         prompt: User's natural-language description of the site.
-        max_tokens: Token limit for LLM response. Default 16k is enough
-                    for a complete Vite+React project (5-8 files).
+        max_tokens: Token limit for LLM response. Default 32k is enough
+                    for a single rich index.html with inline CSS/JS.
 
     Returns:
         GeneratedSite with all files ready to write to disk.
