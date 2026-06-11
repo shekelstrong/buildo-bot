@@ -17,6 +17,9 @@ from aiogram.types import (
     Message,
 )
 
+from bot.config import get_settings
+from bot.services import notifications
+from bot.services.referral import record_signup
 from bot.services.scenes import get_scene
 
 logger = logging.getLogger(__name__)
@@ -55,12 +58,43 @@ async def _send_scene(message: Message, scene_name: str) -> None:
         logger.exception("scene %s send failed", scene_name)
 
 
+@router.message(CommandStart(deep_link=True))
 @router.message(CommandStart())
-async def cmd_start(message: Message) -> None:
-    """Greet user with welcome scene + main menu."""
+async def cmd_start(message: Message, command) -> None:  # type: ignore[no-untyped-def]
+    """Greet user with welcome scene + main menu. Handles /start ref_CODE."""
     if message.from_user is None:
         return
     name = message.from_user.first_name or "друг"
+
+    # Handle deep-link ref code (e.g. /start ref_ABC123)
+    ref_code: str | None = None
+    args = getattr(command, "args", None)
+    if args and args.startswith("ref_"):
+        ref_code = args[4:].strip()
+        if not ref_code:
+            ref_code = None
+
+    if ref_code:
+        try:
+            referrers = await record_signup(
+                new_user_tg_id=message.from_user.id,
+                new_user_username=message.from_user.username,
+                new_user_first_name=message.from_user.first_name,
+                ref_code=ref_code,
+            )
+            # Notify referrers (anon) + admin (full)
+            if message.bot:
+                await notifications.notify_signup(
+                    bot=message.bot,
+                    referrers=referrers,
+                    new_user_tg_id=message.from_user.id,
+                    new_user_username=message.from_user.username,
+                    new_user_first_name=message.from_user.first_name,
+                    ref_code=ref_code,
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("referral signup failed")
+
     await _send_scene(message, "welcome")
     await message.answer(
         f"✦ <b>Привет, {name}!</b>\n\n"
