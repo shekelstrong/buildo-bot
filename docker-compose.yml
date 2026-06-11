@@ -10,8 +10,10 @@ services:
     volumes:
       - ./logs:/app/logs
     # Expose health on host port 9090 (8080 is taken by langnexus-bot on this host)
+    # Public API for buildo-web and buildo-miniapp on 8888
     ports:
       - "9090:8080"
+      - "8888:8888"
     networks:
       - buildo-net
     depends_on:

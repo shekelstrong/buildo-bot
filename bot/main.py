@@ -2,8 +2,12 @@
 
 Run via: `python -m bot.main`
 Or via Docker entrypoint.
-"""
 
+Exposes (all on single FastAPI app, single port):
+  - /health         — liveness probe
+  - /api/v1/*       — public API for buildo-web + buildo-miniapp
+  - Telegram bot (long polling, separate asyncio task)
+"""
 from __future__ import annotations
 
 import asyncio
@@ -18,6 +22,7 @@ from aiogram.fsm.storage.redis import RedisStorage
 from fastapi import FastAPI
 from redis.asyncio import Redis
 
+from bot.api.app import create_api_app
 from bot.config import get_settings
 from bot.handlers import admin as admin_handlers
 from bot.handlers import common as common_handlers
@@ -27,8 +32,8 @@ from bot.middlewares import AdminFilter, LoggingMiddleware
 logger = logging.getLogger(__name__)
 
 
-def build_app() -> tuple[Bot, Dispatcher, FastAPI]:
-    """Wire all components. Exposed for tests."""
+def build_app() -> tuple[Bot, Dispatcher]:
+    """Wire all bot components. Exposed for tests."""
     settings = get_settings()
 
     logging.basicConfig(
@@ -56,12 +61,26 @@ def build_app() -> tuple[Bot, Dispatcher, FastAPI]:
     dp.include_router(site_handlers.router)
     dp.include_router(common_handlers.router)
 
-    return bot, dp, None
+    return bot, dp
+
+
+def build_http_app() -> FastAPI:
+    """Build single FastAPI app: health + public API on one port."""
+    app = FastAPI(title="buildo-bot", version="0.1.0-mvp")
+
+    @app.get("/health")
+    async def health() -> dict[str, str]:
+        return {"status": "ok", "service": "buildo-bot"}
+
+    # Mount public API under /api/v1
+    api_app = create_api_app()
+    app.mount("/api/v1", api_app)
+    return app
 
 
 async def run_polling() -> None:
     """Production entrypoint - long polling (default for tg bots)."""
-    bot, dp, _ = build_app()
+    bot, dp = build_app()
     settings = get_settings()
     logger.info("Buildo bot starting (env=%s)", settings.environment)
     try:
@@ -70,27 +89,20 @@ async def run_polling() -> None:
         await bot.session.close()
 
 
-async def run_health() -> None:
-    """Run FastAPI health server in parallel with polling.
-
-    Creates a separate FastAPI app to avoid double-include_router on the Dispatcher.
-    """
-    app = FastAPI(title="buildo-bot", version="0.1.0-mvp")
-
-    @app.get("/health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok", "service": "buildo-bot"}
-
+async def run_http() -> None:
+    """Single FastAPI server: /health + /api/v1/* on 0.0.0.0:8080 (mapped to 9090 host)."""
+    app = build_http_app()
     config = uvicorn.Config(
-        app, host="0.0.0.0", port=get_settings().health_port, log_level="warning"
+        app, host="0.0.0.0", port=get_settings().health_port, log_level="info"
     )
     server = uvicorn.Server(config)
+    logger.info("HTTP server starting on port %d", get_settings().health_port)
     await server.serve()
 
 
 async def main() -> None:
-    """Combined: polling + health endpoint."""
-    await asyncio.gather(run_polling(), run_health())
+    """Combined: polling + HTTP (health + public API)."""
+    await asyncio.gather(run_polling(), run_http())
 
 
 if __name__ == "__main__":

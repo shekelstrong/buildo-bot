@@ -41,7 +41,7 @@ def test_dispatcher_wires_all_routers():
                 mock_storage = MagicMock()
                 MockStorage.return_value = mock_storage
 
-                bot, dp, app = build_app()
+                bot, dp = build_app()
 
     # Inspect dispatcher routers
     router_names = [r.name for r in dp.sub_routers]
