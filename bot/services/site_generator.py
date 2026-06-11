@@ -152,7 +152,10 @@ def _parse_response(raw: str) -> GeneratedSite:
                     open_braces = 0
                 try:
                     parsed = json.loads(repaired)
-                    logger.warning("Repaired truncated JSON (%d extra chars)", len(repaired) - len(text))
+                    logger.warning(
+                        "Repaired truncated JSON (%d extra chars)",
+                        len(repaired) - len(text),
+                    )
                     break
                 except json.JSONDecodeError:
                     pass

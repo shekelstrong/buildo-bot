@@ -5,6 +5,7 @@ Style guide (in prompt): midnight ocean + cyan tide + amber + paper cream,
 flat geometric, dev-tool vibe, no text in images (we add via Telegram),
 no people faces, abstract symbols (gears, code, hammers, blocks).
 """
+
 import asyncio
 import base64
 import os
@@ -25,32 +26,74 @@ STYLE = (
 
 # (filename, scene description, aspect)
 SCENES = [
-    ("welcome.png", "A friendly abstract composition: a glowing cyan hammer striking a stylized document/webpage block, "
-                    "with floating geometric shapes around (circles, triangles, code brackets). "
-                    "Represents 'building websites with AI'. Hero scene.", "1:1"),
-    ("no_sites.png", "An empty cardboard box or shelf with a single amber light inside, surrounded by floating cyan dots. "
-                     "Represents 'no sites yet, ready to be created'. Quiet, inviting.", "1:1"),
-    ("generating.png", "Abstract cyan gears meshing with amber sparks, code brackets flying around, "
-                       "a glowing webpage block being assembled in the center. "
-                       "Represents 'AI generating your site'. Dynamic, in motion.", "1:1"),
-    ("editing.png", "A cyan magnifying glass examining a document, amber pencil/mark hover above, "
-                    "diff lines (+/-) glowing. Represents 'editing your site in dialog'.", "1:1"),
-    ("published.png", "A stylized rocket made of cyan+amber geometric blocks launching from a paper-cream base, "
-                      "leaving a cyan trail. Represents 'site published successfully'.", "1:1"),
-    ("menu.png", "Three floating cards/panels (like a UI dashboard) on a midnight background, "
-                 "with cyan connection lines between them. Represents 'main menu with all your sites'.", "1:1"),
-    ("error.png", "A broken geometric puzzle piece falling apart, amber warning triangle in corner, "
-                  "calm cyan tones. Represents 'something went wrong, but it's ok'.", "1:1"),
-    ("referral.png", "Three connected nodes in cyan, with a central amber star/coin, "
-                     "lines of light between them forming a triangle. Represents '3-level referral program'.", "1:1"),
-    ("payment.png", "A stylized credit card with cyan chip, amber checkmark, and floating coins, "
-                    "on a calm midnight background. Represents 'secure payment'.", "1:1"),
-    ("admin.png", "A control panel mockup: sliders, switches, gauges, with cyan+amber indicators, "
-                  "no text. Represents 'admin controls'.", "1:1"),
+    (
+        "welcome.png",
+        "A friendly abstract composition: a glowing cyan hammer striking a stylized document/webpage block, "
+        "with floating geometric shapes around (circles, triangles, code brackets). "
+        "Represents 'building websites with AI'. Hero scene.",
+        "1:1",
+    ),
+    (
+        "no_sites.png",
+        "An empty cardboard box or shelf with a single amber light inside, surrounded by floating cyan dots. "
+        "Represents 'no sites yet, ready to be created'. Quiet, inviting.",
+        "1:1",
+    ),
+    (
+        "generating.png",
+        "Abstract cyan gears meshing with amber sparks, code brackets flying around, "
+        "a glowing webpage block being assembled in the center. "
+        "Represents 'AI generating your site'. Dynamic, in motion.",
+        "1:1",
+    ),
+    (
+        "editing.png",
+        "A cyan magnifying glass examining a document, amber pencil/mark hover above, "
+        "diff lines (+/-) glowing. Represents 'editing your site in dialog'.",
+        "1:1",
+    ),
+    (
+        "published.png",
+        "A stylized rocket made of cyan+amber geometric blocks launching from a paper-cream base, "
+        "leaving a cyan trail. Represents 'site published successfully'.",
+        "1:1",
+    ),
+    (
+        "menu.png",
+        "Three floating cards/panels (like a UI dashboard) on a midnight background, "
+        "with cyan connection lines between them. Represents 'main menu with all your sites'.",
+        "1:1",
+    ),
+    (
+        "error.png",
+        "A broken geometric puzzle piece falling apart, amber warning triangle in corner, "
+        "calm cyan tones. Represents 'something went wrong, but it's ok'.",
+        "1:1",
+    ),
+    (
+        "referral.png",
+        "Three connected nodes in cyan, with a central amber star/coin, "
+        "lines of light between them forming a triangle. Represents '3-level referral program'.",
+        "1:1",
+    ),
+    (
+        "payment.png",
+        "A stylized credit card with cyan chip, amber checkmark, and floating coins, "
+        "on a calm midnight background. Represents 'secure payment'.",
+        "1:1",
+    ),
+    (
+        "admin.png",
+        "A control panel mockup: sliders, switches, gauges, with cyan+amber indicators, "
+        "no text. Represents 'admin controls'.",
+        "1:1",
+    ),
 ]
 
 
-async def generate_one(client: httpx.AsyncClient, api_key: str, filename: str, desc: str, aspect: str) -> bool:
+async def generate_one(
+    client: httpx.AsyncClient, api_key: str, filename: str, desc: str, aspect: str
+) -> bool:
     prompt = f"{STYLE}\n\nScene: {desc}\n\nAspect ratio: {aspect}."
     print(f"Generating {filename}...")
     try:
@@ -72,7 +115,9 @@ async def generate_one(client: httpx.AsyncClient, api_key: str, filename: str, d
             img_url = msg["images"][0]["image_url"]["url"]
             if img_url.startswith("data:image"):
                 b64 = img_url.split(",", 1)[1]
-                Path(f"/tmp/buildo-bot/assets/bot/{filename}").write_bytes(base64.b64decode(b64))
+                Path(f"/tmp/buildo-bot/assets/bot/{filename}").write_bytes(
+                    base64.b64decode(b64)
+                )
                 size = Path(f"/tmp/buildo-bot/assets/bot/{filename}").stat().st_size
                 print(f"  ✓ {filename} ({size//1024}KB)")
                 return True
@@ -91,7 +136,9 @@ async def main() -> None:
         env_file = Path.home() / ".buildo-bot.env"
         if env_file.exists():
             for line in env_file.read_text().splitlines():
-                if line.startswith("OPENROUTER_API_KEY=") or line.startswith("OR_API_KEY="):
+                if line.startswith("OPENROUTER_API_KEY=") or line.startswith(
+                    "OR_API_KEY="
+                ):
                     api_key = line.split("=", 1)[1].strip().strip('"')
                     break
     if not api_key:

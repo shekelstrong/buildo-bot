@@ -4,6 +4,7 @@
 Tests the full pipeline: generate_site() -> write_site_files() -> deploy_preview()
 Verifies: no npm dependency, files written, deploy succeeds.
 """
+
 import asyncio
 import sys
 import uuid
@@ -46,12 +47,14 @@ async def main() -> None:
         print("  ✗ Expected single index.html file")
         sys.exit(1)
 
-    print(f"\n[2/3] Deploying preview...")
+    print("\n[2/3] Deploying preview...")
     test_tg = 99999999
     test_site_id = str(uuid.uuid4())
     files_dicts = [{"path": f.path, "content": f.content} for f in site.files]
     try:
-        result = await preview.deploy_preview(test_tg, test_site_id, files_dicts, site.project_name)
+        result = await preview.deploy_preview(
+            test_tg, test_site_id, files_dicts, site.project_name
+        )
     except Exception as e:
         print(f"  ✗ Deploy failed: {e}")
         sys.exit(1)
@@ -62,7 +65,7 @@ async def main() -> None:
 
     print(f"  ✓ Deployed: {result.url}")
 
-    print(f"\n[3/3] Verifying files on disk...")
+    print("\n[3/3] Verifying files on disk...")
     site_path = Path.home() / "buildo-sites" / str(test_tg) / test_site_id
     public_path = Path.home() / "buildo-sites" / "public" / str(test_tg) / test_site_id
     if not (site_path / "index.html").exists():
@@ -76,13 +79,14 @@ async def main() -> None:
     print(f"  ✓ Source: {site_path}/index.html ({src_size}b)")
     print(f"  ✓ Public: {public_path}/index.html ({pub_size}b)")
 
-    print(f"\n  Preview snippet (first 400 chars):")
+    print("\n  Preview snippet (first 400 chars):")
     print(f"  {((public_path / 'index.html').read_text()[:400])}...")
 
     print("\n  ✓ ALL CHECKS PASSED")
 
     # Cleanup
     import shutil
+
     shutil.rmtree(site_path, ignore_errors=True)
     shutil.rmtree(public_path, ignore_errors=True)
     print("  ✓ Cleanup done")
