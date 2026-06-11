@@ -11,6 +11,10 @@ jobs:
     name: SSH deploy to 108.165.164.85
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      ADMIN_TELEGRAM_ID: ${{ secrets.ADMIN_TELEGRAM_ID }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
     steps:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1
@@ -19,12 +23,10 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           command_timeout: 10m
-
           script: |
             set -e
             mkdir -p ~/Projects
             cd ~/Projects
-            # If buildo-bot exists but is not a git repo (empty dir from bootstrap), remove it
             if [ -d buildo-bot ] && [ ! -d buildo-bot/.git ]; then
               echo "Removing stale empty buildo-bot dir"
               rm -rf buildo-bot
@@ -43,9 +45,9 @@ jobs:
               PG_PW="${POSTGRES_PASSWORD:-$(openssl rand -hex 16)}"
               RD_PW="${REDIS_PASSWORD:-$(openssl rand -hex 16)}"
               cat > .env <<ENVEOF
-            TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
-            ADMIN_TELEGRAM_ID=${{ secrets.ADMIN_TELEGRAM_ID }}
-            LLM_API_KEY=${{ secrets.LLM_API_KEY }}
+            TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+            ADMIN_TELEGRAM_ID=${ADMIN_TELEGRAM_ID}
+            LLM_API_KEY=${LLM_API_KEY}
             OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
             POSTGRES_PASSWORD=${PG_PW}
             REDIS_PASSWORD=${RD_PW}
