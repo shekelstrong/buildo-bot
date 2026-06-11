@@ -24,7 +24,14 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field(default="dummy_token_for_ci")
     admin_telegram_id: int = Field(default=6318513424)
 
-    # ===== Supabase =====
+    # ===== Database (self-hosted PostgreSQL, primary path) =====
+    postgres_dsn: str = Field(
+        default="postgresql://buildo:***@buildo-postgres:5432/buildo"
+    )
+    postgres_password: str = "dummy_postgres"
+    redis_password: str = "dummy_redis"
+
+    # ===== Supabase (legacy/optional, NOT primary) =====
     supabase_url: str = "https://your-project.supabase.co"
     supabase_service_key: str = "dummy_service_key"
     supabase_anon_key: str = "dummy_anon_key"

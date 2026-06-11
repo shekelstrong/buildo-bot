@@ -235,7 +235,7 @@ async def cb_deploy(callback: CallbackQuery, state: FSMContext) -> None:
     )
     await state.clear()
 
-    # Persist to Supabase (best-effort, non-blocking)
+    # Persist to PostgreSQL (best-effort, non-blocking)
     if callback.from_user is not None:
         await _persist_site(site, callback.from_user.id, target, url)
 
@@ -243,26 +243,33 @@ async def cb_deploy(callback: CallbackQuery, state: FSMContext) -> None:
 async def _persist_site(
     site, tg_user_id: int, deploy_target: str, deploy_url: str
 ) -> None:
-    """Save generated site to Supabase. Best-effort, never raises."""
+    """Save generated site to PostgreSQL. Best-effort, never raises."""
     try:
-        client = supabase.get_client()
-        if client is None:
-            logger.info("supabase unavailable, skipping persist")
+        # Ensure user exists, then save
+        user = await supabase.upsert_tg_user(tg_user_id=tg_user_id)
+        if user is None:
+            logger.info("DB unavailable, skipping persist")
             return
-        client.table("sites").insert(
-            {
-                "tg_user_id": tg_user_id,
-                "project_name": site.project_name,
-                "framework": site.framework,
-                "files_count": len(site.files),
-                "size_kb": site.total_size_kb,
-                "preview_summary": site.preview_summary,
-                "deploy_target": deploy_target,
-                "deploy_url": deploy_url,
-            }
-        ).execute()
+        user_id = user.get("id") if isinstance(user, dict) else user["id"]
+        result = await supabase.save_site(
+            user_id=user_id,
+            project_name=site.project_name,
+            framework=site.framework,
+            files_count=len(site.files),
+            size_kb=site.total_size_kb,
+            preview_summary=site.preview_summary,
+            deploy_target=deploy_target.lower(),
+            deploy_url=deploy_url,
+            prompt=site.preview_summary or "",
+        )
+        if (
+            result
+            and isinstance(result, dict)
+            and result.get("error") == "free_tier_limit"
+        ):
+            logger.info("free tier limit reached for user %s", tg_user_id)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("supabase persist failed: %s", exc)
+        logger.warning("persist_site failed: %s", exc)
 
 
 def _preview_keyboard():

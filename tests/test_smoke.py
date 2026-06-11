@@ -35,11 +35,12 @@ def test_admin_filter():
 
 
 def test_services_import():
-    from bot.services import admin, llm, supabase
+    from bot.services import admin, database, llm, supabase
 
     assert admin.get_stats is not None
     assert llm.chat is not None
-    assert supabase.get_client is not None
+    assert database.get_pool is not None
+    assert supabase.upsert_tg_user is not None  # re-exported shim
 
 
 def test_admin_stats_returns_dict():
