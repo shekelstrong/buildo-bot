@@ -18,13 +18,38 @@ jobs:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          command_timeout: 10m
           script: |
-            cd ~/Projects/buildo-bot
+            set -e
+            mkdir -p ~/Projects
+            cd ~/Projects
+            if [ ! -d buildo-bot ]; then
+              git clone https://github.com/shekelstrong/buildo-bot.git buildo-bot
+            fi
+            cd buildo-bot
             git pull origin main
             if [ -f ~/.buildo-bot.env ]; then
               cp ~/.buildo-bot.env .env
+              echo "Using server-side env from ~/.buildo-bot.env"
+            else
+              echo "WARNING: no ~/.buildo-bot.env on server, writing minimal from Secrets"
+              cat > .env <<ENVEOF
+            TELEGRAM_BOT_TOKEN=*** secrets.TELEGRAM_BOT_TOKEN }}
+            ADMIN_TELEGRAM_ID=${{ secrets.ADMIN_TELEGRAM_ID }}
+            LLM_API_KEY=*** secrets.LLM_API_KEY }}
+            ENVIRONMENT=production
+            LOG_LEVEL=INFO
+            REDIS_URL=redis://buildo-redis:6379/0
+            HEALTH_PORT=8080
+            ENVEOF
             fi
             docker compose up -d --build
+            sleep 8
             docker compose ps
-            sleep 5
-            curl -fsS http://localhost:8080/health || (echo "HEALTH CHECK FAILED" && docker compose logs --tail=50)
+            if curl -fsS http://localhost:8080/health; then
+              echo "HEALTH OK"
+            else
+              echo "HEALTH FAILED - logs:"
+              docker compose logs --tail=100
+              exit 1
+            fi
