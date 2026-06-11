@@ -72,7 +72,8 @@ QUALITY BAR:
 - Code must RUN. Just open index.html in a browser — that's it.
 - No placeholder comments. No TODO. No "..." truncations.
 - Single-page only. Multi-page sites are out of scope for one call.
-- Total file size: aim for 30-80KB of HTML (rich enough to look designed, small enough to render fast).
+- Total file size: aim for 20-40KB of HTML. Less is fine. Be CONCISE.
+- Use 3-5 sections max. Short copy. Tight CSS. No bloat.
 """
 
 
@@ -134,7 +135,31 @@ def _parse_response(raw: str) -> GeneratedSite:
                     pass
 
     if not isinstance(parsed, dict):
-        raise ValueError(f"LLM response is not valid JSON object: {raw[:200]}")
+        # Try to repair truncated JSON (LLM hit max_tokens)
+        if text.startswith("{") and not text.rstrip().endswith("}"):
+            # Try to close the JSON by adding missing braces/brackets
+            repaired = text
+            # Count open/close braces and brackets
+            open_braces = repaired.count("{") - repaired.count("}")
+            open_brackets = repaired.count("[") - repaired.count("]")
+            # Try progressively: close brackets first, then braces
+            for _ in range(max(open_braces, open_brackets) + 1):
+                if open_brackets > 0:
+                    repaired += "]" * open_brackets
+                    open_brackets = 0
+                if open_braces > 0:
+                    repaired += "}" * open_braces
+                    open_braces = 0
+                try:
+                    parsed = json.loads(repaired)
+                    logger.warning("Repaired truncated JSON (%d extra chars)", len(repaired) - len(text))
+                    break
+                except json.JSONDecodeError:
+                    pass
+        if parsed is None:
+            raise ValueError(f"LLM response is not valid JSON object: {raw[:200]}")
+        if not isinstance(parsed, dict):
+            raise ValueError(f"LLM response is not a JSON object: {raw[:200]}")
 
     files_data = parsed.get("files", [])
     if not isinstance(files_data, list) or not files_data:
