@@ -8,6 +8,7 @@ Exposes (all on single FastAPI app, single port):
   - /api/v1/*       — public API for buildo-web + buildo-miniapp
   - Telegram bot (long polling, separate asyncio task)
 """
+
 from __future__ import annotations
 
 import asyncio

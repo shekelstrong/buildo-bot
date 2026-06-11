@@ -6,6 +6,7 @@ to change.
 
 Connection: postgres://buildo:***@buildo-postgres:5432/buildo (Docker internal)
 """
+
 from __future__ import annotations
 
 import json
@@ -63,6 +64,7 @@ async def close_pool() -> None:
 # =====================================================================
 # USER OPERATIONS
 # =====================================================================
+
 
 async def upsert_tg_user(
     tg_user_id: int,
@@ -132,6 +134,7 @@ async def ban_user(tg_user_id: int) -> bool:
 # SITE OPERATIONS
 # =====================================================================
 
+
 async def save_site(
     user_id: int,
     project_name: str,
@@ -157,8 +160,15 @@ async def save_site(
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
-                    (user_id, project_name, framework, prompt,
-                     files_count, size_kb, preview_summary),
+                    (
+                        user_id,
+                        project_name,
+                        framework,
+                        prompt,
+                        files_count,
+                        size_kb,
+                        preview_summary,
+                    ),
                 )
                 row = await cur.fetchone()
                 project_id = row["id"] if row else None
@@ -232,6 +242,7 @@ async def redeploy_site(site_id: str) -> bool:
 # ADMIN / PLATFORM STATS
 # =====================================================================
 
+
 async def get_platform_stats() -> dict[str, int] | None:
     pool = await get_pool()
     if pool is None:
@@ -253,9 +264,7 @@ async def get_recent_users(limit: int = 50) -> list[dict[str, Any]]:
     try:
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT * FROM v_recent_users LIMIT %s", (limit,)
-                )
+                await cur.execute("SELECT * FROM v_recent_users LIMIT %s", (limit,))
                 return list(await cur.fetchall())
     except Exception as exc:  # noqa: BLE001
         logger.warning("get_recent_users failed: %s", exc)
@@ -269,9 +278,7 @@ async def get_recent_payments(limit: int = 50) -> list[dict[str, Any]]:
     try:
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT * FROM v_recent_payments LIMIT %s", (limit,)
-                )
+                await cur.execute("SELECT * FROM v_recent_payments LIMIT %s", (limit,))
                 return list(await cur.fetchall())
     except Exception as exc:  # noqa: BLE001
         logger.warning("get_recent_payments failed: %s", exc)
@@ -282,7 +289,10 @@ async def get_recent_payments(limit: int = 50) -> list[dict[str, Any]]:
 # AUDIT
 # =====================================================================
 
-async def log_action(actor_id: int, action: str, target: str | None = None, **metadata) -> None:
+
+async def log_action(
+    actor_id: int, action: str, target: str | None = None, **metadata
+) -> None:
     pool = await get_pool()
     if pool is None:
         return

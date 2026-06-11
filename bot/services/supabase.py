@@ -3,6 +3,7 @@
 Kept so existing imports of `from bot.services import supabase` work.
 All actual logic is in bot.services.database (psycopg-based, async).
 """
+
 from typing import Any
 
 # Re-export async functions for backward compat

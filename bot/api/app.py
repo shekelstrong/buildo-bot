@@ -2,6 +2,7 @@
 
 Exposed on port 8888 (separate from internal health on 9090).
 """
+
 from __future__ import annotations
 
 import logging

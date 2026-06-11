@@ -4,6 +4,7 @@ Queries hit the self-hosted Buildo PostgreSQL via bot.services.database.
 If the DB is unreachable, deterministic placeholder data is returned so
 the admin panel works in stub mode.
 """
+
 from __future__ import annotations
 
 import logging

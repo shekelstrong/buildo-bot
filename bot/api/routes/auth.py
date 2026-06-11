@@ -1,4 +1,5 @@
 """Auth API — for OAuth callbacks from buildo-web."""
+
 from __future__ import annotations
 
 import logging

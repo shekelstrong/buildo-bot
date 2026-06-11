@@ -1,4 +1,5 @@
 """Sites API endpoints — for buildo-web dashboard and buildo-miniapp."""
+
 from __future__ import annotations
 
 import logging
@@ -15,7 +16,9 @@ router = APIRouter(prefix="/sites", tags=["sites"])
 
 @router.get("")
 async def list_sites(
-    tg_user_id: int = Query(6318513424, description="Telegram user ID (MVP: hardcoded admin)"),
+    tg_user_id: int = Query(
+        6318513424, description="Telegram user ID (MVP: hardcoded admin)"
+    ),
     limit: int = Query(20, ge=1, le=100),
 ) -> dict[str, Any]:
     """List all sites for a Telegram user."""
