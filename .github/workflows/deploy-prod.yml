@@ -24,6 +24,11 @@ jobs:
             set -e
             mkdir -p ~/Projects
             cd ~/Projects
+            # If buildo-bot exists but is not a git repo (empty dir from bootstrap), remove it
+            if [ -d buildo-bot ] && [ ! -d buildo-bot/.git ]; then
+              echo "Removing stale empty buildo-bot dir"
+              rm -rf buildo-bot
+            fi
             if [ ! -d buildo-bot ]; then
               git clone https://github.com/shekelstrong/buildo-bot.git buildo-bot
             fi
