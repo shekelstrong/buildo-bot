@@ -42,7 +42,7 @@ def create_api_app() -> FastAPI:
     app.include_router(sites.router)
     app.include_router(auth.router)
 
-    @app.get("/api/health")
+    @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok", "service": "buildo-api", "version": "0.1.0-mvp"}
 

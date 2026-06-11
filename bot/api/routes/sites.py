@@ -10,7 +10,7 @@ from bot.services import database
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/sites", tags=["sites"])
+router = APIRouter(prefix="/sites", tags=["sites"])
 
 
 @router.get("")
