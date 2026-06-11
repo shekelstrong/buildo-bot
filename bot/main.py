@@ -56,13 +56,7 @@ def build_app() -> tuple[Bot, Dispatcher, FastAPI]:
     dp.include_router(site_handlers.router)
     dp.include_router(common_handlers.router)
 
-    app = FastAPI(title="buildo-bot", version="0.1.0-mvp")
-
-    @app.get("/health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok", "service": "buildo-bot"}
-
-    return bot, dp, app
+    return bot, dp, None
 
 
 async def run_polling() -> None:
@@ -77,8 +71,16 @@ async def run_polling() -> None:
 
 
 async def run_health() -> None:
-    """Run FastAPI health server in parallel with polling."""
-    _, _, app = build_app()
+    """Run FastAPI health server in parallel with polling.
+
+    Creates a separate FastAPI app to avoid double-include_router on the Dispatcher.
+    """
+    app = FastAPI(title="buildo-bot", version="0.1.0-mvp")
+
+    @app.get("/health")
+    async def health() -> dict[str, str]:
+        return {"status": "ok", "service": "buildo-bot"}
+
     config = uvicorn.Config(
         app, host="0.0.0.0", port=get_settings().health_port, log_level="warning"
     )
