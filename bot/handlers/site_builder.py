@@ -24,6 +24,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -33,6 +34,7 @@ from typing import cast
 
 from bot.services import database, preview, supabase
 from bot.services.agent import apply_edit
+from bot.services.scenes import get_scene
 from bot.services.site_generator import generate_site
 
 logger = logging.getLogger(__name__)
@@ -89,6 +91,18 @@ def _editing_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+async def _send_scene(message: Message, scene_name: str) -> None:
+    """Send a scene PNG inline (Telegram renders as photo)."""
+    try:
+        png = get_scene(scene_name)
+        await message.answer_photo(
+            photo=BufferedInputFile(png, filename=f"{scene_name}.png"),
+            caption="",
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("scene %s send failed", scene_name)
+
+
 def _versions_keyboard(
     versions: list[dict], current_version: str
 ) -> InlineKeyboardMarkup:
@@ -113,6 +127,7 @@ async def cmd_site(message: Message, state: FSMContext) -> None:
     """Start the site-builder flow."""
     await state.clear()
     await state.set_state(SiteFlow.waiting_for_prompt)
+    await _send_scene(message, "generating")
     await message.answer(
         "✦ <b>Создаём новый сайт</b>\n\n"
         "Опиши словами, что нужно сделать. Чем подробнее — тем точнее результат.\n\n"
@@ -170,7 +185,17 @@ async def cb_done(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     if callback.message:
         try:
-            await cast(Message, callback.message).edit_text(
+            msg = cast(Message, callback.message)
+            # Send scene
+            try:
+                png = get_scene("published")
+                await msg.answer_photo(
+                    photo=BufferedInputFile(png, filename="published.png"),
+                    caption="",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            await msg.answer(
                 "✦ <b>Готово!</b>\n\n"
                 f"Сайт опубликован: {data.get('preview_url', '—')}\n\n"
                 "/site — создать ещё\n"
@@ -592,13 +617,14 @@ async def cmd_rollback(message: Message, state: FSMContext) -> None:
 
 @router.message(Command("sites"))
 async def cmd_sites(message: Message) -> None:
-    """List user's sites from PostgreSQL."""
+    """List user's sites from PostgreSQL with scene + refresh button."""
     if message.from_user is None:
         return
     tg_user_id = message.from_user.id
     try:
         user = await supabase.upsert_tg_user(tg_user_id=tg_user_id)
         if user is None:
+            await _send_scene(message, "error")
             await message.answer("📦 <b>Мои сайты</b>\n\n<i>БД недоступна.</i>")
             return
         user_id_raw = user.get("id") if isinstance(user, dict) else user["id"]
@@ -608,11 +634,23 @@ async def cmd_sites(message: Message) -> None:
         user_id = int(user_id_raw)
         sites = await supabase.list_user_sites(user_id, limit=20)
         if not sites:
+            await _send_scene(message, "no_sites")
             await message.answer(
                 "📦 <b>Мои сайты</b>\n\n"
-                "<i>У тебя пока нет сайтов. /site — создать первый.</i>"
+                "<i>У тебя пока нет сайтов.</i>\n\n"
+                "Жми «✦ Создать сайт» чтобы начать.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="✦ Создать сайт", callback_data="menu:site"
+                            )
+                        ]
+                    ]
+                ),
             )
             return
+        await _send_scene(message, "menu")
         lines = ["📦 <b>Мои сайты</b>\n"]
         for s in sites[:20]:
             name = s.get("project_name") or "Без названия"
@@ -624,9 +662,24 @@ async def cmd_sites(message: Message) -> None:
             else:
                 lines.append(f"• <b>{name}</b> · {status} · {ts}")
         lines.append("\n/site — создать ещё")
-        await message.answer("\n".join(lines))
+        await message.answer(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="✦ Создать ещё", callback_data="menu:site"
+                        ),
+                        InlineKeyboardButton(
+                            text="🔄 Обновить", callback_data="menu:sites"
+                        ),
+                    ]
+                ]
+            ),
+        )
     except Exception as exc:
         logger.exception("cmd_sites failed")
+        await _send_scene(message, "error")
         await message.answer(f"✗ Ошибка: <code>{exc}</code>")
 
 

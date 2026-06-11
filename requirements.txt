@@ -15,3 +15,4 @@ uvicorn[standard]==0.32.0
 cryptography==43.0.3
 pyyaml==6.0.2
 psycopg[binary,pool]==3.2.3
+cairosvg==2.7.1
