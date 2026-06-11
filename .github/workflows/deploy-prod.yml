@@ -47,9 +47,9 @@ jobs:
             ADMIN_TELEGRAM_ID=${ADMIN_TELEGRAM_ID}
             LLM_API_KEY=${LLM_API_KEY}
             OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-            POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-            REDIS_PASSWORD=${REDIS_PASSWORD}
-            POSTGRES_DSN=postgresql://buildo:${POSTGRES_PASSWORD}@buildo-postgres:5432/buildo
+            POSTGRES_PASSWORD=${PG_PW}
+            REDIS_PASSWORD=${RD_PW}
+            POSTGRES_DSN=postgresql://buildo:${PG_PW}@buildo-postgres:5432/buildo
             REDIS_URL=redis://:${RD_PW}@buildo-redis:6379/0
             LAYERO_API_TOKEN=${LAYERO_API_TOKEN}
             REGRU_API_LOGIN=${REGRU_API_LOGIN}
