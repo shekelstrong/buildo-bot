@@ -64,13 +64,45 @@ async def cmd_site(message: Message, state: FSMContext) -> None:
 
 @router.message(Command("sites"))
 async def cmd_sites(message: Message) -> None:
-    """List user's sites (stub - Phase 1.5 will pull from Supabase)."""
-    await message.answer(
-        "📦 <b>Мои сайты</b>\n\n"
-        "<i>Список появится после того как Supabase будет подключён. "
-        "Сейчас все сгенерированные сайты ты можешь увидеть по "
-        "ссылке которую я пришлю после генерации.</i>"
-    )
+    """List user's sites from PostgreSQL."""
+    if message.from_user is None:
+        return
+    tg_user_id = message.from_user.id
+    try:
+        user = await supabase.upsert_tg_user(tg_user_id=tg_user_id)
+        if user is None:
+            await message.answer(
+                "📦 <b>Мои сайты</b>\n\n"
+                "<i>БД временно недоступна. Попробуй позже.</i>"
+            )
+            return
+        user_id_raw = user.get("id") if isinstance(user, dict) else user["id"]
+        if user_id_raw is None:
+            await message.answer("❌ Не удалось получить user_id")
+            return
+        user_id = int(user_id_raw)
+        sites = await supabase.list_user_sites(user_id, limit=20)
+        if not sites:
+            await message.answer(
+                "📦 <b>Мои сайты</b>\n\n"
+                "<i>У тебя пока нет сайтов. Нажми /site чтобы создать первый.</i>"
+            )
+            return
+        lines = ["📦 <b>Мои сайты</b>\n"]
+        for s in sites[:20]:
+            name = s.get("project_name") or "Без названия"
+            url = s.get("deploy_url") or ""
+            target = s.get("deploy_target") or "—"
+            status = s.get("status") or "—"
+            if url:
+                lines.append(f"• <b>{name}</b> · {target} · {status}\n  🔗 {url}")
+            else:
+                lines.append(f"• <b>{name}</b> · {target} · {status}")
+        lines.append("\n/site — создать ещё")
+        await message.answer("\n".join(lines))
+    except Exception as exc:
+        logger.exception("cmd_sites failed")
+        await message.answer(f"❌ Ошибка: <code>{exc}</code>")
 
 
 @router.message(SiteFlow.waiting_for_prompt)
@@ -250,7 +282,10 @@ async def _persist_site(
         if user is None:
             logger.info("DB unavailable, skipping persist")
             return
-        user_id = user.get("id") if isinstance(user, dict) else user["id"]
+        user_id_raw = user.get("id") if isinstance(user, dict) else user["id"]
+        if user_id_raw is None:
+            return
+        user_id = int(user_id_raw)
         result = await supabase.save_site(
             user_id=user_id,
             project_name=site.project_name,
