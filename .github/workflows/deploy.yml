@@ -1,0 +1,50 @@
+name: Buildo bot — Lint, Test, Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  lint-test:
+    name: Lint & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff==0.7.3 pytest pytest-asyncio
+      - name: Ruff lint
+        run: ruff check bot/ tests/
+      - name: Ruff format check
+        run: ruff format --check bot/ tests/
+      - name: Pytest
+        run: python -m pytest tests/ -v
+        env:
+          TELEGRAM_BOT_TOKEN: test_dummy
+          ADMIN_TELEGRAM_ID: "6318513424"
+          SUPABASE_URL: https://test.supabase.co
+          SUPABASE_SERVICE_KEY: test_dummy
+          SUPABASE_ANON_KEY: test_dummy
+          OPENROUTER_API_KEY: test_dummy
+          REDIS_URL: redis://localhost:***/v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            cd ~/Projects/buildo-bot
+            git pull origin main
+            if [ -f ~/.buildo-bot.env ]; then
+              cp ~/.buildo-bot.env .env
+            fi
+            docker compose up -d --build
+            docker compose ps
+            sleep 5
+            curl -fsS http://localhost:8080/health || (echo "HEALTH CHECK FAILED" && docker compose logs --tail=50)
