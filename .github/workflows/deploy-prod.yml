@@ -42,9 +42,9 @@ jobs:
               PG_PW="${POSTGRES_PASSWORD:-$(openssl rand -hex 16)}"
               RD_PW="${REDIS_PASSWORD:-$(openssl rand -hex 16)}"
               cat > .env <<ENVEOF
-            TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-            ADMIN_TELEGRAM_ID=${ADMIN_TELEGRAM_ID}
-            LLM_API_KEY=${LLM_API_KEY}
+            TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
+            ADMIN_TELEGRAM_ID=${{ secrets.ADMIN_TELEGRAM_ID }}
+            LLM_API_KEY=${{ secrets.LLM_API_KEY }}
             OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
             POSTGRES_PASSWORD=${PG_PW}
             REDIS_PASSWORD=${RD_PW}
