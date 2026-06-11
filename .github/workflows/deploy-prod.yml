@@ -1,0 +1,30 @@
+name: Buildo bot - Deploy to production
+
+on:
+  workflow_run:
+    workflows: ["Buildo bot - Lint, Test, Deploy"]
+    types: [completed]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: SSH deploy to 108.165.164.85
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            cd ~/Projects/buildo-bot
+            git pull origin main
+            if [ -f ~/.buildo-bot.env ]; then
+              cp ~/.buildo-bot.env .env
+            fi
+            docker compose up -d --build
+            docker compose ps
+            sleep 5
+            curl -fsS http://localhost:8080/health || (echo "HEALTH CHECK FAILED" && docker compose logs --tail=50)
