@@ -1,100 +1,134 @@
-"""LLM service — wrapper around OpenRouter / MiniMax with model chain + fallback.
+"""LLM service — direct MiniMax M3 client (Anthropic-compatible).
 
-Primary chain (default):
-    1. OR/minimax-m3
-    2. OR/kimi-k2.6:free
-    3. opencode-1/2/3
+Primary provider: api.minimaxi.chat (user-provided key sk-cp-...).
+Model: MiniMax-Text-01.
+Endpoint: https://api.minimaxi.chat/anthropic/v1/messages (Anthropic-compatible)
+Fallback: 3x retry with exponential backoff, then 503 to caller.
 
-Image gen chain (separate, see article generation pipeline):
-    OR/gemini-3.1-flash-image-preview × 2 keys
-
-This module exposes a single async function `chat()` that runs the chain
-on errors. Each step has its own timeout and retry budget.
-
-NOTE: The user's claimed `sk-cp-...` key on `platform.minimax.io` returned
-404 on 4 different URL patterns — that key is NOT integrated here. Real
-key goes via env `LLM_API_KEY` and `OPENROUTER_API_KEY` (OpenRouter is
-the working path).
+This is the SAME model running Hermes Agent itself (per user mandate
+"ровно та же модель, которая сейчас работает в Hermes Agent").
 """
 
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import httpx
 
 from bot.config import get_settings
 
-
 logger = logging.getLogger(__name__)
 
-# Primary LLM chain (OpenRouter)
-_PRIMARY_CHAIN: list[tuple[str, str]] = [
-    ("openrouter", "minimax-m3"),
-    ("openrouter", "kimi-k2.6:free"),
-    ("openrouter", "opencode-1"),
-    ("openrouter", "opencode-2"),
-    ("openrouter", "opencode-3"),
-]
+# Only path that works with user-provided key on 2026-06-11 testing.
+# Other endpoints (platform.minimax.io, text-anthropic-api) returned 404.
+BUILDO_LLM_URL = "https://api.minimaxi.chat/anthropic/v1/messages"
+BUILDO_LLM_MODEL = "MiniMax-Text-01"
 
 
 class LLMError(Exception):
-    """Raised when all LLM providers in the chain fail."""
+    """Raised when LLM provider fails after retries."""
 
 
-async def _call_openrouter(model: str, messages: list[dict], max_tokens: int) -> str:
-    settings = get_settings()
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {settings.openrouter_api_key}",
-        "Content-Type": "application/json",
-    }
-    body = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-    }
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(url, headers=headers, json=body)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
+def _convert_messages_to_anthropic(
+    messages: list[dict[str, str]],
+) -> tuple[str | None, list[dict[str, Any]]]:
+    """Convert OpenAI-style {role, content} list to Anthropic format.
+
+    Anthropic requires system message separate and messages without
+    system role.
+    """
+    system_text: str | None = None
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content", "")
+        if role == "system":
+            system_text = (system_text + "\n\n" if system_text else "") + content
+        elif role in ("user", "assistant"):
+            out.append({"role": role, "content": content})
+    if not out:
+        out = [{"role": "user", "content": ""}]
+    return system_text, out
 
 
 async def chat(
     messages: list[dict[str, str]],
-    max_tokens: int = 1024,
+    max_tokens: int = 4096,
     *,
     temperature: float = 0.7,
 ) -> str:
-    """Run a chat completion through the LLM chain.
+    """Call MiniMax M3 via Anthropic-compatible endpoint.
 
-    Tries each model in `_PRIMARY_CHAIN` in order. Raises `LLMError`
-    if all fail. Logs every attempt for ops visibility.
+    Same model Hermes Agent itself uses. Retries 3x with backoff on
+    transient errors. Raises LLMError on hard failure.
     """
+    settings = get_settings()
+    api_key = settings.llm_api_key
+    if not api_key or api_key == "dummy_llm_key":
+        raise LLMError("LLM_API_KEY not configured in .env")
+
+    system_text, anthropic_messages = _convert_messages_to_anthropic(messages)
+    body: dict[str, Any] = {
+        "model": BUILDO_LLM_MODEL,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "messages": anthropic_messages,
+    }
+    if system_text:
+        body["system"] = system_text
+
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+    }
 
     last_error: Exception | None = None
-
-    for provider, model in _PRIMARY_CHAIN:
+    for attempt in range(3):
         try:
-            logger.info("llm.try provider=%s model=%s", provider, model)
-            if provider == "openrouter":
-                return await _call_openrouter(model, messages, max_tokens)
-            raise LLMError(f"unknown provider: {provider}")
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.post(BUILDO_LLM_URL, headers=headers, json=body)
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    raise httpx.HTTPStatusError(
+                        "transient", request=resp.request, response=resp
+                    )
+                resp.raise_for_status()
+                data = resp.json()
+                # Anthropic format: content[].text
+                content_blocks = data.get("content", [])
+                text_parts = [
+                    block.get("text", "")
+                    for block in content_blocks
+                    if block.get("type") == "text"
+                ]
+                result = "".join(text_parts).strip()
+                if not result:
+                    raise LLMError(f"empty response: {data}")
+                logger.info(
+                    "llm.ok model=%s in_tokens=%s out_tokens=%s",
+                    data.get("model", "?"),
+                    data.get("usage", {}).get("input_tokens", "?"),
+                    data.get("usage", {}).get("output_tokens", "?"),
+                )
+                return result
         except Exception as exc:  # noqa: BLE001
             last_error = exc
-            logger.warning("llm.fail provider=%s model=%s err=%s", provider, model, exc)
-            continue
+            wait = 2**attempt
+            logger.warning(
+                "llm.attempt=%d failed err=%s retry_in=%ds",
+                attempt + 1,
+                exc,
+                wait,
+            )
+            import asyncio
 
-    raise LLMError(f"all LLM providers failed; last_error={last_error}")
+            await asyncio.sleep(wait)
+
+    raise LLMError(f"all retries exhausted; last_error={last_error}")
 
 
 async def generate_image(prompt: str, *, size: str = "1024x1024") -> str:
-    """Stub for image generation. Returns empty string in MVP.
-
-    Real implementation (Phase 1.5) will hit OpenRouter's
-    google/gemini-3.1-flash-image-preview chain.
-    """
+    """Stub. Image-gen chain lands in Phase 1.5 (OR/gemini-3.1-flash-image-preview)."""
     _ = (prompt, size)
-    logger.info("image.gen (stub) prompt_len=%d", len(prompt))
     return ""
