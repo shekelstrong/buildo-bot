@@ -63,8 +63,10 @@ async def write_site_files(
     # Wipe old version (atomic — this is "preview", not "production")
     if base.exists():
         loop = asyncio.get_event_loop()
+
         def _rmtree() -> None:
             shutil.rmtree(base, ignore_errors=True)
+
         await loop.run_in_executor(None, _rmtree)
     base.mkdir(parents=True, exist_ok=True)
 

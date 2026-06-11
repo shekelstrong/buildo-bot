@@ -155,7 +155,8 @@ def _parse_response(raw: str) -> GeneratedSite:
         css = "\n".join(f.content for f in files if f.path.endswith(".css"))
         js = "\n".join(f.content for f in files if f.path.endswith(".js"))
         html_body = next(
-            (f.content for f in files if f.path.endswith(".html")), "<h1>Buildo site</h1>"
+            (f.content for f in files if f.path.endswith(".html")),
+            "<h1>Buildo site</h1>",
         )
         # If html_body is full document, strip doctype/head
         if "<body" in html_body:

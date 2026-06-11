@@ -89,14 +89,20 @@ def _editing_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def _versions_keyboard(versions: list[dict], current_version: str) -> InlineKeyboardMarkup:
+def _versions_keyboard(
+    versions: list[dict], current_version: str
+) -> InlineKeyboardMarkup:
     """Inline buttons for Time Travel — one per version."""
     rows = []
     for v in versions[:8]:  # max 8 buttons (Telegram limit)
         ver = v.get("version", "?")
         marker = " ←" if ver == current_version else ""
         rows.append(
-            [InlineKeyboardButton(text=f"⏪ {ver}{marker}", callback_data=f"{CB_ROLLBACK_PREFIX}{ver}")]
+            [
+                InlineKeyboardButton(
+                    text=f"⏪ {ver}{marker}", callback_data=f"{CB_ROLLBACK_PREFIX}{ver}"
+                )
+            ]
         )
     rows.append([InlineKeyboardButton(text="📋 В меню", callback_data=CB_MENU)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -254,7 +260,9 @@ async def cb_versions(callback: CallbackQuery, state: FSMContext) -> None:
         try:
             await cast(Message, callback.message).edit_text(
                 "\n".join(lines),
-                reply_markup=_versions_keyboard(versions, data.get("current_version", "")),
+                reply_markup=_versions_keyboard(
+                    versions, data.get("current_version", "")
+                ),
             )
         except Exception:  # noqa: BLE001
             pass
