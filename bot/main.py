@@ -4,8 +4,9 @@ Run via: `python -m bot.main`
 Or via Docker entrypoint.
 
 Exposes (all on single FastAPI app, single port):
-  - /health         — liveness probe
-  - /api/v1/*       — public API for buildo-web + buildo-miniapp
+  - /health                  -- liveness probe
+  - /api/v1/*                -- public API for buildo-web + buildo-miniapp
+  - /sites-static/<tg>/<id>/ -- built site previews (static files)
   - Telegram bot (long polling, separate asyncio task)
 """
 
@@ -14,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
+from pathlib import Path
 
 import uvicorn
 from aiogram import Bot, Dispatcher
@@ -21,6 +23,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.redis import RedisStorage
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from redis.asyncio import Redis
 
 from bot.api.app import create_api_app
@@ -66,7 +69,7 @@ def build_app() -> tuple[Bot, Dispatcher]:
 
 
 def build_http_app() -> FastAPI:
-    """Build single FastAPI app: health + public API on one port."""
+    """Build single FastAPI app: health + public API + static sites on one port."""
     app = FastAPI(title="buildo-bot", version="0.1.0-mvp")
 
     @app.get("/health")
@@ -76,6 +79,17 @@ def build_http_app() -> FastAPI:
     # Mount public API under /api/v1
     api_app = create_api_app()
     app.mount("/api/v1", api_app)
+
+    # Mount static site previews from ~/buildo-sites/public/
+    # Each site is at /sites-static/<tg_id>/<site_id>/
+    public_dir = Path.home() / "buildo-sites" / "public"
+    public_dir.mkdir(parents=True, exist_ok=True)
+    app.mount(
+        "/sites-static",
+        StaticFiles(directory=str(public_dir), html=True),
+        name="sites-static",
+    )
+
     return app
 
 

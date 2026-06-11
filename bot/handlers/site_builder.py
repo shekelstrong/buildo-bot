@@ -1,23 +1,31 @@
-"""/site and /sites — site-builder flow (Phase 1 / MVP).
+"""/site — site-builder flow with preview, agent, and time-travel.
 
-Full flow:
-  /site  -> wait prompt -> generate via MiniMax M3
-         -> preview summary + file list
-         -> ask deploy target (Layero / GitHub)
-         -> deploy -> send URL
+Flow:
+  /site     -> ask prompt
+  [prompt]  -> generate via LLM
+            -> auto-deploy preview
+            -> show URL + "Исправить / Готово / Удалить"
+  [edit]    -> in 'editing' state: agent applies change, re-deploys
+            -> shows diff summary + new URL
+  /done     -> publish (mark as deployed in DB)
+  /cancel   -> abort, clean up
+
+Time travel: every deploy creates v1, v2, v3... User can roll back via /versions
 """
 
 from __future__ import annotations
 
 import logging
+import uuid
 
-from aiogram import F, Router
+from aiogram import Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import Message
 
-from bot.services import github_export, layero, supabase
+from bot.services import database, preview, supabase
+from bot.services.agent import apply_edit
 from bot.services.site_generator import generate_site
 
 logger = logging.getLogger(__name__)
@@ -26,29 +34,26 @@ router = Router(name="site_builder")
 
 
 class SiteFlow(StatesGroup):
-    """FSM for site creation flow."""
+    """FSM for site creation + dialog editing flow."""
 
     waiting_for_prompt = State()
     preview = State()
-    waiting_for_deploy_target = State()
+    editing = State()
 
 
-# Callback data constants (use prefixes to avoid collisions)
-CB_DEPLOY_LAYERO = "site:deploy:layero"
-CB_DEPLOY_GITHUB = "site:deploy:github"
-CB_REGENERATE = "site:regenerate"
+# Callback data
+CB_EDIT = "site:edit"
+CB_DONE = "site:done"
+CB_DELETE = "site:delete"
 CB_CANCEL = "site:cancel"
-
-
-def _build_files_preview(site) -> str:
-    """Short file list for the preview message (no full code)."""
-    lines = [f"📁 <b>{p}</b>" for p in sorted({f.path for f in site.files})]
-    return "\n".join(lines[:12])  # cap at 12 for telegram message limit
+CB_VERSIONS = "site:versions"
+CB_ROLLBACK_PREFIX = "site:rollback:"
 
 
 @router.message(Command("site"))
 async def cmd_site(message: Message, state: FSMContext) -> None:
     """Start the site-builder flow."""
+    await state.clear()
     await state.set_state(SiteFlow.waiting_for_prompt)
     await message.answer(
         "🚀 <b>Создаём новый сайт</b>\n\n"
@@ -58,7 +63,289 @@ async def cmd_site(message: Message, state: FSMContext) -> None:
         "секции: hero, меню, контакты»</i>\n"
         "<i>«портфолио веб-дизайнера с кейсами и контактами, тёмная тема»</i>\n"
         "<i>«сайт-визитка для автосервиса, серьёзный стиль, форма записи»</i>\n\n"
-        "Нажми /cancel для отмены."
+        "/cancel — отмена"
+    )
+
+
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext) -> None:
+    """Cancel current flow."""
+    await state.clear()
+    await message.answer("Окей, отменил. /site — начать заново.")
+
+
+@router.message(Command("done"))
+async def cmd_done(message: Message, state: FSMContext) -> None:
+    """Finish editing and publish site as final."""
+    cur = await state.get_state()
+    if cur != SiteFlow.editing.state:
+        return
+    data = await state.get_data()
+    site_id = data.get("site_id")
+    tg_id = message.from_user.id if message.from_user else None
+    if site_id and tg_id:
+        # mark as published
+        try:
+            await database.update_site_status(
+                site_id, "published", deploy_url=data.get("preview_url", "")
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("publish failed")
+    await state.clear()
+    await message.answer(
+        "✅ <b>Готово!</b>\n\n"
+        f"Сайт опубликован: {data.get('preview_url', '—')}\n\n"
+        "/site — создать ещё\n/sites — мои сайты"
+    )
+
+
+@router.message(SiteFlow.waiting_for_prompt)
+async def receive_prompt(message: Message, state: FSMContext) -> None:
+    """User sent a prompt: generate, deploy preview, show URL."""
+    if message.text is None or not message.text.strip():
+        await message.answer("Пришли текстом описание сайта.")
+        return
+
+    prompt = message.text.strip()
+    thinking = await message.answer(
+        f"🤖 Генерирую сайт...\n<i>{prompt[:150]}{'...' if len(prompt) > 150 else ''}</i>\n\n"
+        "Обычно 30-90 секунд."
+    )
+
+    try:
+        site = await generate_site(prompt)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("generate_site failed")
+        await thinking.edit_text(
+            f"❌ Не получилось: <code>{exc}</code>\n\n"
+            "Попробуй переформулировать или /cancel."
+        )
+        await state.clear()
+        return
+
+    # Create site_id, save to DB, deploy preview
+    tg_id = message.from_user.id if message.from_user else 0
+    site_id = str(uuid.uuid4())
+
+    # Persist to DB first (so we can rollback)
+    try:
+        if tg_id:
+            user = await supabase.upsert_tg_user(tg_user_id=tg_id)
+            user_id_raw = user.get("id") if isinstance(user, dict) else user["id"]
+            if user_id_raw is not None:
+                user_id = int(user_id_raw)
+                await database.save_site(
+                    user_id=user_id,
+                    project_name=site.project_name,
+                    framework=site.framework,
+                    files_count=len(site.files),
+                    size_kb=site.total_size_kb,
+                    preview_summary=site.preview_summary,
+                    deploy_target="layero",
+                    deploy_url="",
+                    prompt=prompt,
+                    site_id=site_id,
+                )
+    except Exception:  # noqa: BLE001
+        logger.exception("save_site failed (continuing with deploy)")
+
+    # Save v1
+    files_dicts = [{"path": f.path, "content": f.content} for f in site.files]
+    try:
+        await preview.save_version(tg_id, site_id, "v1", files_dicts)
+    except Exception:  # noqa: BLE001
+        logger.exception("save_version v1 failed")
+
+    # Deploy preview
+    result = await preview.deploy_preview(
+        tg_id, site_id, files_dicts, site.project_name
+    )
+
+    if not result.success:
+        await thinking.edit_text(
+            f"❌ Не получилось задеплоить: <code>{result.error[:200]}</code>\n\n"
+            "/cancel — отменить"
+        )
+        await state.clear()
+        return
+
+    # Update DB with URL
+    try:
+        await database.update_site_deploy(site_id, deploy_url=result.url)
+    except Exception:  # noqa: BLE001
+        logger.exception("update deploy url failed")
+
+    # Save state for editing
+    await state.update_data(
+        prompt=prompt,
+        site_id=site_id,
+        project_name=site.project_name,
+        preview_url=result.url,
+        current_version="v1",
+        current_files=files_dicts,
+    )
+    await state.set_state(SiteFlow.preview)
+
+    # Build files preview
+    file_list = "\n".join(f"  📄 {f.path}" for f in site.files[:10])
+
+    await thinking.edit_text(
+        f"🎨 <b>Готово!</b>\n\n"
+        f"<i>{site.preview_summary}</i>\n\n"
+        f"🌐 <b>Превью:</b> {result.url}\n\n"
+        f"📁 Файлы ({len(site.files)}):\n{file_list}\n\n"
+        "Что дальше?\n"
+        "• Напиши что изменить — я переделаю\n"
+        "• /done — опубликовать\n"
+        "• /cancel — удалить черновик"
+    )
+
+
+@router.message(SiteFlow.preview)
+async def receive_first_edit(message: Message, state: FSMContext) -> None:
+    """After preview, user can send an edit instruction."""
+    if message.text is None or not message.text.strip():
+        return
+    # Transition to editing state and process
+    await state.set_state(SiteFlow.editing)
+    await _apply_user_edit(message, state)
+
+
+@router.message(SiteFlow.editing)
+async def receive_edit(message: Message, state: FSMContext) -> None:
+    """In editing mode: apply user's instruction, re-deploy."""
+    if message.text is None or not message.text.strip():
+        return
+    await _apply_user_edit(message, state)
+
+
+async def _apply_user_edit(message: Message, state: FSMContext) -> None:
+    """Common edit handler: agent edit -> save version -> re-deploy preview."""
+    if message.text is None:
+        return
+    instruction = message.text.strip()
+    data = await state.get_data()
+    site_id = data.get("site_id")
+    tg_id = message.from_user.id if message.from_user else 0
+    current_files: list[dict[str, str]] = data.get("current_files", [])
+
+    if not site_id or not current_files:
+        await message.answer("❌ Не нашёл текущий сайт в памяти. Начни заново: /site")
+        await state.clear()
+        return
+
+    thinking = await message.answer(f"✏️ Применяю: <i>{instruction[:200]}</i>")
+
+    try:
+        edit = await apply_edit(current_files, instruction)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("agent edit failed")
+        await thinking.edit_text(
+            f"❌ Не получилось: <code>{exc}</code>\n\n" "Попробуй переформулировать."
+        )
+        return
+
+    # Save next version
+    next_v = preview.next_version(tg_id, site_id)
+    new_files_dicts = [{"path": f.path, "content": f.content} for f in edit.new_files]
+    try:
+        await preview.save_version(tg_id, site_id, next_v, new_files_dicts)
+    except Exception:  # noqa: BLE001
+        logger.exception("save_version failed")
+
+    # Re-deploy preview
+    result = await preview.deploy_preview(
+        tg_id, site_id, new_files_dicts, data.get("project_name", "")
+    )
+
+    if not result.success:
+        await thinking.edit_text(
+            f"❌ Edit применился, но деплой упал: <code>{result.error[:200]}</code>\n\n"
+            "Попробуй ещё раз."
+        )
+        return
+
+    # Update DB
+    try:
+        await database.update_site_deploy(site_id, deploy_url=result.url)
+    except Exception:  # noqa: BLE001
+        logger.exception("update deploy url failed")
+
+    # Update state
+    await state.update_data(
+        current_version=next_v,
+        current_files=new_files_dicts,
+        preview_url=result.url,
+    )
+
+    await thinking.edit_text(
+        f"✅ {edit.preview_message}\n\n"
+        f"🌐 Новое превью: {result.url}\n\n"
+        f"📝 {edit.summary}\n\n"
+        "Ещё что-то поменять? Пиши. Или /done — опубликовать."
+    )
+
+
+@router.message(Command("versions"))
+async def cmd_versions(message: Message, state: FSMContext) -> None:
+    """List saved versions of current site (Time Travel)."""
+    data = await state.get_data()
+    site_id = data.get("site_id")
+    tg_id = message.from_user.id if message.from_user else 0
+    if not site_id:
+        await message.answer("Нет активного сайта. /site — создать.")
+        return
+    versions = preview.list_versions(tg_id, site_id)
+    if not versions:
+        await message.answer("Версий пока нет.")
+        return
+    lines = ["🕒 <b>Версии сайта:</b>\n"]
+    for v in versions:
+        saved = v.get("saved_at", "?")[:19]
+        lines.append(
+            f"• <b>{v.get('version', '?')}</b> · {v.get('files_count', 0)} файлов · {saved}"
+        )
+    lines.append("\nЧтобы откатиться, напиши /rollback v2 (например)")
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("rollback"))
+async def cmd_rollback(message: Message, state: FSMContext) -> None:
+    """Roll back to a specific version: /rollback v2"""
+    if message.text is None:
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Укажи версию: /rollback v2")
+        return
+    target_version = parts[1].strip()
+    data = await state.get_data()
+    site_id = data.get("site_id")
+    tg_id = message.from_user.id if message.from_user else 0
+    if not site_id:
+        await message.answer("Нет активного сайта.")
+        return
+
+    files = preview.get_version_files(tg_id, site_id, target_version)
+    if not files:
+        await message.answer(f"❌ Версия {target_version} не найдена")
+        return
+
+    # Re-deploy
+    result = await preview.deploy_preview(
+        tg_id, site_id, files, data.get("project_name", "")
+    )
+    if not result.success:
+        await message.answer(f"❌ Деплой упал: {result.error[:200]}")
+        return
+
+    await state.update_data(
+        current_version=target_version,
+        current_files=files,
+        preview_url=result.url,
+    )
+    await message.answer(
+        f"⏪ Откатился к <b>{target_version}</b>\n\n" f"🌐 Превью: {result.url}"
     )
 
 
@@ -71,33 +358,30 @@ async def cmd_sites(message: Message) -> None:
     try:
         user = await supabase.upsert_tg_user(tg_user_id=tg_user_id)
         if user is None:
-            await message.answer(
-                "📦 <b>Мои сайты</b>\n\n"
-                "<i>БД временно недоступна. Попробуй позже.</i>"
-            )
+            await message.answer("📦 <b>Мои сайты</b>\n\n<i>БД недоступна.</i>")
             return
         user_id_raw = user.get("id") if isinstance(user, dict) else user["id"]
         if user_id_raw is None:
-            await message.answer("❌ Не удалось получить user_id")
+            await message.answer("❌ Ошибка user_id")
             return
         user_id = int(user_id_raw)
         sites = await supabase.list_user_sites(user_id, limit=20)
         if not sites:
             await message.answer(
                 "📦 <b>Мои сайты</b>\n\n"
-                "<i>У тебя пока нет сайтов. Нажми /site чтобы создать первый.</i>"
+                "<i>У тебя пока нет сайтов. /site — создать первый.</i>"
             )
             return
         lines = ["📦 <b>Мои сайты</b>\n"]
         for s in sites[:20]:
             name = s.get("project_name") or "Без названия"
             url = s.get("deploy_url") or ""
-            target = s.get("deploy_target") or "—"
             status = s.get("status") or "—"
+            ts = (s.get("last_deploy_at") or "")[:19]
             if url:
-                lines.append(f"• <b>{name}</b> · {target} · {status}\n  🔗 {url}")
+                lines.append(f"• <b>{name}</b> · {status} · {ts}\n  🔗 {url}")
             else:
-                lines.append(f"• <b>{name}</b> · {target} · {status}")
+                lines.append(f"• <b>{name}</b> · {status} · {ts}")
         lines.append("\n/site — создать ещё")
         await message.answer("\n".join(lines))
     except Exception as exc:
@@ -105,221 +389,15 @@ async def cmd_sites(message: Message) -> None:
         await message.answer(f"❌ Ошибка: <code>{exc}</code>")
 
 
-@router.message(SiteFlow.waiting_for_prompt)
-async def receive_prompt(message: Message, state: FSMContext) -> None:
-    """Receive user's prompt, generate site, show preview."""
-    if message.text is None or not message.text.strip():
-        await message.answer("Пришли текстом описание сайта.")
-        return
-
-    prompt = message.text.strip()
-    thinking = await message.answer(
-        f"✅ Принял: <i>{prompt[:150]}{'...' if len(prompt) > 150 else ''}</i>\n\n"
-        "🤖 Думаю над дизайном и кодом...\n"
-        "<i>(обычно 30-90 секунд)</i>"
-    )
-
-    try:
-        site = await generate_site(prompt)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("site.gen failed")
-        await thinking.edit_text(
-            f"❌ Не получилось сгенерировать сайт: <code>{exc}</code>\n\n"
-            "Попробуй переформулировать запрос или нажми /cancel."
-        )
-        await state.clear()
-        return
-
-    # Persist in FSM
-    await state.update_data(
-        prompt=prompt,
-        site=site.to_dict(),
-    )
-    await state.set_state(SiteFlow.preview)
-
-    files_preview = _build_files_preview(site)
-    summary = site.preview_summary or "Готово."
-
-    kb = _preview_keyboard()
-    await thinking.edit_text(
-        f"🎨 <b>Готово!</b>\n\n"
-        f"<i>{summary}</i>\n\n"
-        f"<b>Файлы ({len(site.files)}):</b>\n{files_preview}\n\n"
-        f"📦 Размер: <b>{site.total_size_kb:.1f} KB</b>\n\n"
-        "Куда задеплоить?",
-        reply_markup=kb,
-    )
+# ===== Static serving for built sites =====
 
 
-@router.callback_query(F.data == CB_REGENERATE)
-async def cb_regenerate(callback: CallbackQuery, state: FSMContext) -> None:
-    """Regenerate with the same prompt.
-
-    Note: we can't reuse `receive_prompt` directly because it expects a
-    Message, not a CallbackQuery, and the typing of callback.message is
-    InaccessibleMessage after edits. Instead we just clear state and
-    ask the user to send the prompt again — simpler and less error-prone.
-    """
-    data = await state.get_data()
-    prompt = data.get("prompt", "")
-    if not prompt:
-        await callback.answer("Нет сохранённого промта, начни заново: /site")
-        await state.clear()
-        return
-    # Restore state to waiting_for_prompt and feed the prompt back
-    await state.set_state(SiteFlow.waiting_for_prompt)
-    await state.update_data(prompt=prompt)
-    try:
-        await callback.message.edit_text(  # type: ignore[union-attr]
-            f"🔄 Регенерирую с тем же промтом:\n<i>{prompt[:200]}</i>\n\n" "🤖 Думаю..."
-        )
-    except Exception:  # noqa: BLE001
-        pass
-
-    # Invoke the prompt-receiver directly with a synthetic Message-like wrapper
-    class _Msg:
-        def __init__(self, text: str, from_user):
-            self.text = text
-            self.from_user = from_user
-
-        async def answer(self, *args, **kwargs):
-            return await callback.message.answer(*args, **kwargs)  # type: ignore[union-attr]
-
-    synthetic = _Msg(prompt, callback.from_user)
-    await receive_prompt(synthetic, state)  # type: ignore[arg-type]
-    await callback.answer()
-
-
-@router.callback_query(F.data == CB_CANCEL)
-async def cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
-    await callback.message.edit_text("Окей, отменил. /site — начать заново.")  # type: ignore[union-attr]
-    await callback.answer()
-
-
-@router.callback_query(F.data.in_({CB_DEPLOY_LAYERO, CB_DEPLOY_GITHUB}))
-async def cb_deploy(callback: CallbackQuery, state: FSMContext) -> None:
-    """Deploy to chosen target."""
-    if callback.data == CB_DEPLOY_LAYERO:
-        target = "Layero"
-        action = "деплою на Layero"
-        fn = layero.deploy_to_layero
-        is_layero = True
-    else:
-        target = "GitHub"
-        action = "пушу в GitHub"
-        fn = github_export.export_to_github
-        is_layero = False
-
-    await callback.answer(f"{action}...")
-    await callback.message.edit_text(  # type: ignore[union-attr]
-        f"⏳ {action.capitalize()}...\n<i>обычно 30-120 секунд</i>"
-    )
-
-    data = await state.get_data()
-    site_dict = data.get("site")
-    if not site_dict:
-        await callback.message.edit_text(  # type: ignore[union-attr]
-            "❌ Сайт не найден в FSM. Начни заново: /site"
-        )
-        await state.clear()
-        return
-
-    # Reconstruct GeneratedSite
-    from bot.services.site_generator import GeneratedFile, GeneratedSite
-
-    site = GeneratedSite(
-        project_name=site_dict["project_name"],
-        framework=site_dict["framework"],
-        files=[GeneratedFile(**f) for f in site_dict["files"]],
-        preview_summary=site_dict.get("preview_summary", ""),
-    )
-
-    try:
-        result = await fn(site)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("deploy failed")
-        await callback.message.edit_text(  # type: ignore[union-attr]
-            f"❌ Деплой на {target} упал: <code>{exc}</code>"
-        )
-        return
-
-    if not result.success:
-        await callback.message.edit_text(  # type: ignore[union-attr]
-            f"❌ {target}: {result.message}"
-        )
-        return
-
-    # Success
-    if is_layero:
-        url = result.url
-        msg = f"✅ Задеплоено на Layero!\n\n🔗 <b>{url}</b>\n\nОткрой в браузере."
-    else:
-        url = result.repo_url
-        msg = (
-            f"✅ Запушено в GitHub!\n\n"
-            f"🔗 <b>{url}</b>\n\n"
-            f"Можешь клонировать или сразу подключить к Layero через GitHub App."
-        )
-
-    await callback.message.edit_text(  # type: ignore[union-attr]
-        msg + "\n\n/site — создать ещё, /sites — мои сайты"
-    )
-    await state.clear()
-
-    # Persist to PostgreSQL (best-effort, non-blocking)
-    if callback.from_user is not None:
-        await _persist_site(site, callback.from_user.id, target, url)
-
-
-async def _persist_site(
-    site, tg_user_id: int, deploy_target: str, deploy_url: str
-) -> None:
-    """Save generated site to PostgreSQL. Best-effort, never raises."""
-    try:
-        # Ensure user exists, then save
-        user = await supabase.upsert_tg_user(tg_user_id=tg_user_id)
-        if user is None:
-            logger.info("DB unavailable, skipping persist")
-            return
-        user_id_raw = user.get("id") if isinstance(user, dict) else user["id"]
-        if user_id_raw is None:
-            return
-        user_id = int(user_id_raw)
-        result = await supabase.save_site(
-            user_id=user_id,
-            project_name=site.project_name,
-            framework=site.framework,
-            files_count=len(site.files),
-            size_kb=site.total_size_kb,
-            preview_summary=site.preview_summary,
-            deploy_target=deploy_target.lower(),
-            deploy_url=deploy_url,
-            prompt=site.preview_summary or "",
-        )
-        if (
-            result
-            and isinstance(result, dict)
-            and result.get("error") == "free_tier_limit"
-        ):
-            logger.info("free tier limit reached for user %s", tg_user_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("persist_site failed: %s", exc)
-
-
-def _preview_keyboard():
-    """Inline keyboard for the preview screen."""
-    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🚀 Layero", callback_data=CB_DEPLOY_LAYERO),
-                InlineKeyboardButton(text="📦 GitHub", callback_data=CB_DEPLOY_GITHUB),
-            ],
-            [
-                InlineKeyboardButton(text="🔄 Переделать", callback_data=CB_REGENERATE),
-                InlineKeyboardButton(text="❌ Отмена", callback_data=CB_CANCEL),
-            ],
-        ]
+@router.message(Command("static"))
+async def cmd_static_info(message: Message) -> None:
+    """Show how to access static sites."""
+    await message.answer(
+        "📁 <b>Статические превью</b>\n\n"
+        "Каждый сгенерированный сайт доступен по URL:\n"
+        "<code>http://108.165.164.85:9090/sites-static/&lt;tg_id&gt;/&lt;site_id&gt;/</code>\n\n"
+        "URL приходит в сообщении после генерации."
     )

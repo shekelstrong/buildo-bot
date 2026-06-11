@@ -145,6 +145,7 @@ async def save_site(
     deploy_target: str,
     deploy_url: str,
     prompt: str,
+    site_id: str | None = None,
 ) -> dict[str, Any] | None:
     pool = await get_pool()
     if pool is None:
@@ -174,15 +175,33 @@ async def save_site(
                 project_id = row["id"] if row else None
 
                 # 2) site
-                await cur.execute(
-                    """
-                    INSERT INTO sites (user_id, project_id, project_name,
-                                       deploy_target, deploy_url, status, last_deploy_at)
-                    VALUES (%s, %s, %s, %s, %s, 'deployed', now())
-                    RETURNING *
-                    """,
-                    (user_id, project_id, project_name, deploy_target, deploy_url),
-                )
+                if site_id:
+                    await cur.execute(
+                        """
+                        INSERT INTO sites (id, user_id, project_id, project_name,
+                                           deploy_target, deploy_url, status, last_deploy_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, 'deployed', now())
+                        RETURNING *
+                        """,
+                        (
+                            site_id,
+                            user_id,
+                            project_id,
+                            project_name,
+                            deploy_target,
+                            deploy_url,
+                        ),
+                    )
+                else:
+                    await cur.execute(
+                        """
+                        INSERT INTO sites (user_id, project_id, project_name,
+                                           deploy_target, deploy_url, status, last_deploy_at)
+                        VALUES (%s, %s, %s, %s, %s, 'deployed', now())
+                        RETURNING *
+                        """,
+                        (user_id, project_id, project_name, deploy_target, deploy_url),
+                    )
                 return await cur.fetchone()
     except psycopg.errors.RaiseException as exc:
         # Free tier limit hit
@@ -191,6 +210,48 @@ async def save_site(
     except Exception as exc:  # noqa: BLE001
         logger.warning("save_site failed: %s", exc)
         return None
+
+
+async def update_site_deploy(site_id: str, deploy_url: str) -> bool:
+    """Update deploy URL for a site after a fresh deploy."""
+    pool = await get_pool()
+    if pool is None:
+        return False
+    try:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE sites SET deploy_url = %s, last_deploy_at = now() WHERE id = %s",
+                    (deploy_url, site_id),
+                )
+                return cur.rowcount > 0
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("update_site_deploy failed: %s", exc)
+        return False
+
+
+async def update_site_status(site_id: str, status: str, deploy_url: str = "") -> bool:
+    """Update site status (draft, published, deleted)."""
+    pool = await get_pool()
+    if pool is None:
+        return False
+    try:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                if deploy_url:
+                    await cur.execute(
+                        "UPDATE sites SET status = %s, deploy_url = %s WHERE id = %s",
+                        (status, deploy_url, site_id),
+                    )
+                else:
+                    await cur.execute(
+                        "UPDATE sites SET status = %s WHERE id = %s",
+                        (status, site_id),
+                    )
+                return cur.rowcount > 0
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("update_site_status failed: %s", exc)
+        return False
 
 
 async def list_user_sites(tg_user_id: int, limit: int = 20) -> list[dict[str, Any]]:
