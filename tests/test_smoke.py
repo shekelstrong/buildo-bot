@@ -3,6 +3,7 @@
 Verify bot imports and key services wire up. Real integration tests
 land in Phase 1 once Supabase is connected.
 """
+
 import os
 
 
