@@ -19,6 +19,7 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           command_timeout: 10m
+          envs: TELEGRAM_BOT_TOKEN,ADMIN_TELEGRAM_ID,LLM_API_KEY,POSTGRES_PASSWORD,REDIS_PASSWORD,LAYERO_API_TOKEN,REGRU_API_LOGIN,REGRU_API_PASSWORD,OPENROUTER_API_KEY
           script: |
             set -e
             mkdir -p ~/Projects
@@ -29,44 +30,57 @@ jobs:
             cd buildo-bot
             git pull origin main
 
-            # Build .env from GitHub Secrets at deploy time
-            cat > .env <<ENVEOF
-            TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
-            ADMIN_TELEGRAM_ID=${{ secrets.ADMIN_TELEGRAM_ID }}
-            LLM_API_KEY=${{ secrets.LLM_API_KEY }}
-            OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
-            REDIS_URL=redis://buildo-redis:6379/0
-            LAYERO_API_TOKEN=${{ secrets.LAYERO_API_TOKEN }}
-            REGRU_API_LOGIN=${{ secrets.REGRU_API_LOGIN }}
-            REGRU_API_PASSWORD=${{ secrets.REGRU_API_PASSWORD }}
-            BEGET_API_LOGIN=${{ secrets.BEGET_API_LOGIN }}
-            BEGET_API_PASSWORD=${{ secrets.BEGET_API_PASSWORD }}
-            YOOKASSA_SHOP_ID=${{ secrets.YOOKASSA_SHOP_ID }}
-            YOOKASSA_SECRET_KEY=${{ secrets.YOOKASSA_SECRET_KEY }}
-            CRYPTOBOT_API_TOKEN=${{ secrets.CRYPTOBOT_API_TOKEN }}
-            SUPABASE_URL=${{ secrets.SUPABASE_URL }}
-            SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}
-            SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}
+            if [ -f ~/.buildo-bot.env ]; then
+              echo "Using server-side env from ~/.buildo-bot.env"
+              cp ~/.buildo-bot.env .env
+            else
+              echo "Generating .env from GH Secrets + random passwords"
+              PG_PW="${POSTGRES_PASSWORD:-$(openssl rand -hex 16)}"
+              RD_PW="${REDIS_PASSWORD:-$(openssl rand -hex 16)}"
+              cat > .env <<ENVEOF
+            TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+            ADMIN_TELEGRAM_ID=${ADMIN_TELEGRAM_ID}
+            LLM_API_KEY=${LLM_API_KEY}
+            OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+            POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+            REDIS_PASSWORD=${REDIS_PASSWORD}
+            POSTGRES_DSN=postgresql://buildo:${POSTGRES_PASSWORD}@buildo-postgres:5432/buildo
+            REDIS_URL=redis://:${RD_PW}@buildo-redis:6379/0
+            LAYERO_API_TOKEN=${LAYERO_API_TOKEN}
+            REGRU_API_LOGIN=${REGRU_API_LOGIN}
+            REGRU_API_PASSWORD=${REGRU_API_PASSWORD}
             ENVIRONMENT=production
             LOG_LEVEL=INFO
             HEALTH_PORT=8080
             ENVEOF
-
+            fi
             chmod 600 .env
             echo "wrote .env ($(wc -l < .env) lines)"
 
-            # Start or restart via docker-compose
+            docker compose pull || true
             docker compose up -d --build
 
-            # Wait + health check
-            sleep 10
+            sleep 15
             echo "--- container status ---"
             docker compose ps
-            echo "--- health check ---"
-            if curl -fsS http://localhost:8080/health; then
-              echo "HEALTH OK"
-            else
-              echo "HEALTH FAILED - dumping logs:"
-              docker compose logs --tail=100
-              exit 1
+            echo "--- bot health ---"
+            for i in 1 2 3 4 5; do
+              if curl -fsS http://localhost:8080/health; then
+                echo "BOT HEALTH OK (attempt $i)"
+                break
+              fi
+              echo "waiting for bot (attempt $i/5)"
+              sleep 5
+            done
+
+            echo "--- DB health ---"
+            docker compose exec -T buildo-postgres pg_isready -U buildo -d buildo || echo "DB not ready yet"
+
+            echo "--- apply schema (idempotent) ---"
+            if [ -f db/schema.sql ]; then
+              docker compose cp db/schema.sql buildo-postgres:/tmp/schema.sql
+              docker compose exec -T buildo-postgres psql -U buildo -d buildo -f /tmp/schema.sql || echo "schema apply failed (check logs)"
             fi
+
+            echo "--- recent logs ---"
+            docker compose logs --tail=30 buildo-bot
