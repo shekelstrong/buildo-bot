@@ -1,0 +1,55 @@
+name: Buildo server - Bootstrap (fail2ban + ufw)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bootstrap:
+    name: Install fail2ban + ufw on 108.165.164.85
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bootstrap server
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          command_timeout: 5m
+          script: |
+            set -e
+            # Install fail2ban + ufw
+            if ! command -v fail2ban-client >/dev/null 2>&1; then
+              apt-get update -qq
+              apt-get install -y -qq fail2ban ufw
+            fi
+
+            # fail2ban: 5 SSH attempts -> permanent ban
+            cat > /etc/fail2ban/jail.local <<EOF2
+            [sshd]
+            enabled = true
+            port = ssh
+            filter = sshd
+            logpath = /var/log/auth.log
+            maxretry = 5
+            bantime = -1
+            findtime = 600
+            EOF2
+            systemctl enable --now fail2ban
+            systemctl restart fail2ban
+            echo "fail2ban OK: 5 SSH attempts -> permanent ban"
+
+            # ufw: only SSH (22) + bot health (8080) open
+            ufw --version >/dev/null 2>&1 && {
+              ufw default deny incoming
+              ufw default allow outgoing
+              ufw allow ssh
+              ufw allow 8080/tcp
+              ufw --force enable
+              ufw status verbose
+              echo "ufw OK"
+            }
+
+            # Ensure ~/Projects exists for CI deploy
+            mkdir -p ~/Projects
+            echo "~/Projects ready"
+            echo "BOOTSTRAP DONE"

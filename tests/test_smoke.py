@@ -48,5 +48,6 @@ def test_admin_stats_returns_dict():
     from bot.services.admin import get_stats
 
     s = asyncio.run(get_stats())
+    # Required keys for /admin_stats
     assert "users_total" in s
-    assert "sites_total" in s
+    assert "sites_deployed" in s
