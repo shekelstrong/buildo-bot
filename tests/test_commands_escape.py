@@ -15,6 +15,8 @@ def test_commands_escape_module_imports():
 
     assert hasattr(commands_escape, "router")
     assert commands_escape.router.name == "commands-escape"
+
+
 def test_commands_escape_handles_start():
     """Router should have /start handler in source code."""
     import inspect

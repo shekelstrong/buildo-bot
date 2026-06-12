@@ -6,6 +6,7 @@
 Решает проблему: юзер в SiteFlow.editing пишет /start — бот интерпретирует как
 инструкцию для правки, а не как escape в меню.
 """
+
 from __future__ import annotations
 
 import logging
