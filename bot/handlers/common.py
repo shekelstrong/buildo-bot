@@ -63,16 +63,23 @@ async def _send_scene(message: Message, scene_name: str) -> None:
         logger.exception("scene %s send failed", scene_name)
 
 
-# ============== /start with deep-link ref code ==============
+# ============== Global /start reset (must come BEFORE any state-bound handlers) ==============
 
 
 @router.message(CommandStart(deep_link=True))
 @router.message(CommandStart())
-async def cmd_start(message: Message, command) -> None:  # type: ignore[no-untyped-def]
-    """Greet user with welcome scene + main menu. Handles /start ref_CODE."""
+async def cmd_start(message: Message, command, state: FSMContext) -> None:  # type: ignore[no-untyped-def]
+    """Greet user with welcome scene + main menu. Handles /start ref_CODE.
+
+    Always resets FSM state first so /start works as a universal "back to menu"
+    escape hatch from any state (editing, waiting_for_prompt, etc).
+    """
     if message.from_user is None:
         return
     name = message.from_user.first_name or "друг"
+
+    # CRITICAL: always reset state on /start
+    await state.clear()
 
     # Handle deep-link ref code (e.g. /start ref_ABC123)
     ref_code: str | None = None

@@ -31,6 +31,7 @@ from bot.config import get_settings
 from bot.handlers import admin as admin_handlers
 from bot.handlers import articles as articles_handlers
 from bot.handlers import auth_github as auth_github_handlers
+from bot.handlers import commands_escape as commands_escape_handlers
 from bot.handlers import common as common_handlers
 from bot.handlers import referral as referral_handlers
 from bot.handlers import site_builder as site_handlers
@@ -64,6 +65,9 @@ def build_app() -> tuple[Bot, Dispatcher]:
     admin_handlers.router.message.filter(admin_router_filter)
     admin_handlers.router.callback_query.filter(admin_router_filter)
 
+    # CRITICAL: commands_escape router MUST be registered FIRST so it can
+    # intercept /start, /cancel, "в меню" etc from any FSM state.
+    dp.include_router(commands_escape_handlers.router)
     dp.include_router(admin_handlers.router)
     dp.include_router(site_handlers.router)
     dp.include_router(referral_handlers.router)
