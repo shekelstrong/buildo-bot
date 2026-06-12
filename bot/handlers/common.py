@@ -1,7 +1,14 @@
 """Common handlers — /start, /help, fallback, and main-menu callback buttons.
 
-All replies send a scene image first (where appropriate), then a styled
-text message with premium typography and inline buttons.
+Every reply that includes a scene image is sent as ONE message:
+`answer_photo(caption=text, reply_markup=...)` so the user sees a
+single combined bubble (image + caption + inline buttons), not two
+separate messages.
+
+Telegram's caption limit is 1024 characters — all captions below are
+designed to fit. If a render fails or the scene image is missing, the
+function falls back to a plain text `answer()` so the user always sees
+the menu.
 """
 
 from __future__ import annotations
@@ -29,6 +36,9 @@ logger = logging.getLogger(__name__)
 router = Router(name="common")
 
 
+# ============== Helpers ==============
+
+
 def _main_keyboard() -> InlineKeyboardMarkup:
     """Main menu inline keyboard — always visible from /start."""
     return InlineKeyboardMarkup(
@@ -51,26 +61,68 @@ def _main_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-async def _send_scene(message: Message, scene_name: str) -> None:
-    """Send a scene PNG as a photo (Telegram renders inline).
+async def _send_scene_with_text(
+    message: Message,
+    scene_name: str,
+    caption: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    parse_mode: str = "HTML",
+) -> None:
+    """Send a scene PNG as a photo WITH caption + buttons as ONE message.
 
-    Falls back to plain text (no photo) on any error so the welcome
-    message is still delivered.
+    Falls back to a plain-text `answer()` if:
+      - the scene PNG cannot be rendered (libcairo missing, etc.)
+      - Telegram rejects the photo (e.g. IMAGE_PROCESS_FAILED)
+    In both cases the user sees exactly ONE message — either photo+caption
+    or text+buttons, never two separate bubbles.
     """
     try:
         png = get_scene(scene_name)
-        if png:
+    except Exception:  # noqa: BLE001
+        logger.exception("scene %s render failed", scene_name)
+        png = None
+
+    if png:
+        try:
             await message.answer_photo(
                 photo=BufferedInputFile(png, filename=f"{scene_name}.png"),
-                caption="",
+                caption=caption,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
             )
             return
+        except Exception:  # noqa: BLE001
+            logger.exception("answer_photo with caption failed, falling back to text")
+
+    # Fallback: single plain-text message (no photo)
+    await message.answer(
+        caption,
+        parse_mode=parse_mode,
+        reply_markup=reply_markup,
+    )
+
+
+# Backwards-compat alias for code that still calls _send_scene(...)
+async def _send_scene(message: Message, scene_name: str) -> None:
+    """Legacy helper — sends an empty photo (no caption).
+
+    New code should use `_send_scene_with_text` so the photo and the
+    text+buttons arrive as ONE message.
+    """
+    try:
+        png = get_scene(scene_name)
+    except Exception:  # noqa: BLE001
+        logger.exception("scene %s render failed", scene_name)
+        return
+    if not png:
+        return
+    try:
+        await message.answer_photo(
+            photo=BufferedInputFile(png, filename=f"{scene_name}.png"),
+            caption="",
+        )
     except Exception:  # noqa: BLE001
         logger.exception("scene %s send failed", scene_name)
-    # Fallback: ничего не шлём (основное приветствие идёт из cmd_start
-    # отдельным сообщением, чтобы кнопки инлайн рендерились отдельно).
-    # Если answer_photo упал, aiogram отвечает юзеру обычным сообщением —
-    # текст и кнопки всё равно дойдут, просто без preview-картинки.
 
 
 # ============== Global /start reset (must come BEFORE any state-bound handlers) ==============
@@ -119,8 +171,8 @@ async def cmd_start(message: Message, command, state: FSMContext) -> None:  # ty
         except Exception:  # noqa: BLE001
             logger.exception("referral signup failed")
 
-    await _send_scene(message, "welcome")
-    await message.answer(
+    # ONE message: scene PNG + caption text + inline buttons
+    caption = (
         f"✦ <b>Привет, {name}!</b>\n\n"
         "Я <b>Buildo</b> — AI-платформа для создания сайтов.\n"
         "Опиши словами, что нужно — я сгенерирую код и задеплою за тебя.\n\n"
@@ -129,8 +181,10 @@ async def cmd_start(message: Message, command, state: FSMContext) -> None:  # ty
         "• ✦ Задеплоить автоматически (GitHub / Layero)\n"
         "• ✦ Внести правки через чат (диалог-агент)\n"
         "• ✦ Вести SEO-блог с AI\n"
-        "• ✦ Привести друзей и заработать",
-        reply_markup=_main_keyboard(),
+        "• ✦ Привести друзей и заработать"
+    )
+    await _send_scene_with_text(
+        message, "welcome", caption, reply_markup=_main_keyboard()
     )
 
 
@@ -139,6 +193,7 @@ async def cmd_start(message: Message, command, state: FSMContext) -> None:  # ty
 
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
+    """Send help as a single text message (no scene image)."""
     await message.answer(
         "✦ <b>Справка Buildo</b>\n\n"
         "<b>Как создать сайт:</b>\n"
@@ -197,7 +252,10 @@ async def cb_menu_home(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "menu:site")
 async def cb_menu_site(callback: CallbackQuery, state: FSMContext) -> None:
-    """Inline button 'Создать сайт' — runs single-prompt /site flow."""
+    """Inline button 'Создать сайт' — runs single-prompt /site flow.
+
+    Sends ONE message: scene PNG + prompt instructions + inline buttons.
+    """
     if callback.message is None:
         await callback.answer()
         return
@@ -209,18 +267,7 @@ async def cb_menu_site(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(SiteFlow.waiting_for_prompt)
 
-    try:
-        from bot.services.scenes import get_scene
-
-        png = get_scene("generating")
-        await msg.answer_photo(
-            photo=BufferedInputFile(png, filename="generating.png"),
-            caption="",
-        )
-    except Exception:  # noqa: BLE001
-        pass
-
-    await msg.answer(
+    caption = (
         "✦ <b>Создаём новый сайт</b>\n\n"
         "Опиши всё в одном сообщении — я разберу сам что нужно. "
         "Можно упомянуть:\n\n"
@@ -232,7 +279,12 @@ async def cb_menu_site(callback: CallbackQuery, state: FSMContext) -> None:
         "Пример:\n"
         "<i>«Кофейня Brew в центре Москвы, тёплый минимализм, "
         "тёмно-коричневая палитра, секции hero/меню/контакты, "
-        "кнопка «Записаться»»</i>",
+        "кнопка «Записаться»»</i>"
+    )
+    await _send_scene_with_text(
+        msg,
+        "generating",
+        caption,
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="📋 В меню", callback_data="sb:menu")],
@@ -244,7 +296,10 @@ async def cb_menu_site(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "menu:sites")
 async def cb_menu_sites(callback: CallbackQuery) -> None:
-    """Inline button 'Мои сайты' — calls /sites logic."""
+    """Inline button 'Мои сайты' — calls /sites logic.
+
+    ONE message per state (with or without image, depending on result).
+    """
     if callback.message is None:
         await callback.answer()
         return
@@ -259,8 +314,11 @@ async def cb_menu_sites(callback: CallbackQuery) -> None:
     try:
         user = await supabase.upsert_tg_user(tg_user_id=tg_id)
         if user is None:
-            await _send_scene(msg, "error")
-            await msg.answer("📦 <b>Мои сайты</b>\n\n<i>БД недоступна.</i>")
+            await _send_scene_with_text(
+                msg,
+                "error",
+                "📦 <b>Мои сайты</b>\n\n<i>БД недоступна.</i>",
+            )
             await callback.answer()
             return
         user_id_raw = user.get("id") if isinstance(user, dict) else user["id"]
@@ -271,8 +329,9 @@ async def cb_menu_sites(callback: CallbackQuery) -> None:
         user_id = int(user_id_raw)
         sites = await supabase.list_user_sites(user_id, limit=20)
         if not sites:
-            await _send_scene(msg, "no_sites")
-            await msg.answer(
+            await _send_scene_with_text(
+                msg,
+                "no_sites",
                 "📦 <b>Мои сайты</b>\n\n"
                 "<i>У тебя пока нет сайтов.</i>\n\n"
                 "Жми «✦ Создать сайт» чтобы начать.",
@@ -288,7 +347,6 @@ async def cb_menu_sites(callback: CallbackQuery) -> None:
             )
             await callback.answer()
             return
-        await _send_scene(msg, "menu")
         lines = ["📦 <b>Мои сайты</b>\n"]
         for s in sites[:20]:
             name = s.get("project_name") or "Без названия"
@@ -299,7 +357,9 @@ async def cb_menu_sites(callback: CallbackQuery) -> None:
                 lines.append(f"• <b>{name}</b> · {status} · {ts}\n  🔗 {url}")
             else:
                 lines.append(f"• <b>{name}</b> · {status} · {ts}")
-        await msg.answer(
+        await _send_scene_with_text(
+            msg,
+            "menu",
             "\n".join(lines),
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
@@ -316,8 +376,7 @@ async def cb_menu_sites(callback: CallbackQuery) -> None:
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("cb_menu_sites failed")
-        await _send_scene(msg, "error")
-        await msg.answer(f"✗ Ошибка: <code>{exc}</code>")
+        await _send_scene_with_text(msg, "error", f"✗ Ошибка: <code>{exc}</code>")
     await callback.answer()
 
 
@@ -348,7 +407,10 @@ async def cb_menu_articles(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:referral")
 async def cb_menu_referral(callback: CallbackQuery) -> None:
-    """Inline button 'Рефералы' — runs /referral logic."""
+    """Inline button 'Рефералы' — runs /referral logic.
+
+    ONE message: referral scene + caption + share button.
+    """
     if callback.message is None:
         await callback.answer()
         return
@@ -367,16 +429,18 @@ async def cb_menu_referral(callback: CallbackQuery) -> None:
         await callback.answer()
         return
 
-    try:
-        png = get_scene("referral")
-        await msg.answer_photo(
-            photo=BufferedInputFile(png, filename="referral.png"),
-            caption="",
-        )
-    except Exception:  # noqa: BLE001
-        pass
+    share_text = (
+        "✦ Создай сайт через AI за минуту — https://t.me/buildo_aibot\n"
+        f"Бонус по моей ссылке: {stats.bot_url}"
+    )
+    share_url = (
+        "https://t.me/share/url?url="
+        + make_bot_link(stats.code)
+        + "&text="
+        + share_text.replace(" ", "%20").replace("\n", "%0A")
+    )
 
-    text = (
+    caption = (
         "✦ <b>Реферальная программа Buildo</b>\n\n"
         f"<b>Твоя ссылка:</b>\n<code>{stats.bot_url}</code>\n\n"
         f"<b>Статистика:</b>\n"
@@ -390,19 +454,10 @@ async def cb_menu_referral(callback: CallbackQuery) -> None:
         "• L2 — 10% с оплат рефералов твоих рефералов\n"
         "• L3 — 5% с оплат на 3-м уровне"
     )
-
-    share_text = (
-        "✦ Создай сайт через AI за минуту — https://t.me/buildo_aibot\n"
-        f"Бонус по моей ссылке: {stats.bot_url}"
-    )
-    share_url = (
-        "https://t.me/share/url?url="
-        + make_bot_link(stats.code)
-        + "&text="
-        + share_text.replace(" ", "%20").replace("\n", "%0A")
-    )
-    await msg.answer(
-        text,
+    await _send_scene_with_text(
+        msg,
+        "referral",
+        caption,
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="📤 Поделиться", url=share_url)],
