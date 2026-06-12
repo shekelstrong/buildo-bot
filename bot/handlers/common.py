@@ -171,7 +171,7 @@ async def cb_menu_home(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "menu:site")
 async def cb_menu_site(callback: CallbackQuery, state: FSMContext) -> None:
-    """Inline button 'Создать сайт' — runs multi-step /site flow."""
+    """Inline button 'Создать сайт' — runs single-prompt /site flow."""
     if callback.message is None:
         await callback.answer()
         return
@@ -181,8 +181,7 @@ async def cb_menu_site(callback: CallbackQuery, state: FSMContext) -> None:
     from bot.handlers.site_builder import SiteFlow
 
     await state.clear()
-    await state.set_state(SiteFlow.waiting_for_niche)
-    await state.update_data(brief_sections=[])
+    await state.set_state(SiteFlow.waiting_for_prompt)
 
     try:
         from bot.services.scenes import get_scene
@@ -197,21 +196,19 @@ async def cb_menu_site(callback: CallbackQuery, state: FSMContext) -> None:
 
     await msg.answer(
         "✦ <b>Создаём новый сайт</b>\n\n"
-        "<b>Шаг 1/7: Расскажи про бизнес/проект</b>\n\n"
-        "Что это за сайт, для кого, какая цель? "
-        "Чем конкретнее — тем точнее результат.\n\n"
-        "Примеры:\n"
-        "• <i>Кофейня «Brew» в центре Москвы</i>\n"
-        "• <i>Портфолио веб-дизайнера, фрилансер</i>\n"
-        "• <i>Студия йоги в Петербурге</i>\n"
-        "• <i>Онлайн-курс по Python для начинающих</i>",
+        "Опиши всё в одном сообщении — я разберу сам что нужно. "
+        "Можно упомянуть:\n\n"
+        "• <i>Что за бизнес/проект</i>\n"
+        "• <i>Стиль</i> (минимализм, яркий, строгий, журнальный)\n"
+        "• <i>Цвета</i> (тёмная, тёплая, синяя, серая)\n"
+        "• <i>Секции</i> (меню, услуги, портфолио, контакты)\n"
+        "• <i>Что должна делать кнопка</i>\n\n"
+        "Пример:\n"
+        "<i>«Кофейня Brew в центре Москвы, тёплый минимализм, "
+        "тёмно-коричневая палитра, секции hero/меню/контакты, "
+        "кнопка «Записаться»»</i>",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="⏭ Пропустить", callback_data="brief:niche:skip"
-                    )
-                ],
                 [InlineKeyboardButton(text="📋 В меню", callback_data="sb:menu")],
             ]
         ),

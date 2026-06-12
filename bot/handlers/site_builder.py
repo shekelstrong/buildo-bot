@@ -16,6 +16,7 @@ Time travel: every deploy creates v1, v2, v3... User can roll back via /versions
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from aiogram import F, Router
@@ -29,10 +30,17 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
-from typing import Any, cast
+from typing import cast
 
-from bot.services import database, github_export, preview, site_generator, supabase
-from bot.services import brief, file_prompts, quality
+from bot.services import (
+    database,
+    github_export,
+    preview,
+    quality,
+    site_generator,
+    supabase,
+)
+from bot.services.brief import enrich_prompt
 from bot.services.agent import apply_edit
 from bot.services.scenes import get_scene
 
@@ -42,26 +50,14 @@ router = Router(name="site_builder")
 
 
 class SiteFlow(StatesGroup):
-    """FSM for multi-step site creation + dialog editing flow.
+    """FSM for site creation + dialog editing flow.
 
-    Brief steps:
-    1. waiting_for_niche — ниша
-    2. waiting_for_style — стиль (кнопки)
-    3. waiting_for_sections — секции (toggle кнопки)
-    4. waiting_for_palette — палитра (кнопки)
-    5. waiting_for_cta — CTA (кнопки)
-    6. waiting_for_hero — hero-текст
-    7. waiting_for_file — файл с ТЗ (опционально)
-    → generation → preview / editing
+    Single-prompt flow:
+    1. waiting_for_prompt — юзер отправил текст, идёт генерация
+    → generating → preview / editing
     """
 
-    waiting_for_niche = State()
-    waiting_for_style = State()
-    waiting_for_sections = State()
-    waiting_for_palette = State()
-    waiting_for_cta = State()
-    waiting_for_hero = State()
-    waiting_for_file = State()
+    waiting_for_prompt = State()
     generating = State()
     preview = State()
     editing = State()
@@ -151,29 +147,36 @@ def _versions_keyboard(
 
 @router.message(Command("site"))
 async def cmd_site(message: Message, state: FSMContext) -> None:
-    """Start multi-step site-builder flow (7 шагов)."""
+    """Start site-builder flow. Один промт — несколько внутренних шагов."""
     await state.clear()
-    await state.set_state(SiteFlow.waiting_for_niche)
-    await state.update_data(brief_sections=[])  # пустой список секций
+    await state.set_state(SiteFlow.waiting_for_prompt)
 
-    await _send_scene(message, "generating")
+    try:
+        from bot.services.scenes import get_scene
+
+        png = get_scene("generating")
+        await message.answer_photo(
+            photo=BufferedInputFile(png, filename="generating.png"),
+            caption="",
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
     await message.answer(
         "✦ <b>Создаём новый сайт</b>\n\n"
-        "<b>Шаг 1/7: Расскажи про бизнес/проект</b>\n\n"
-        "Что это за сайт, для кого, какая цель? "
-        "Чем конкретнее — тем точнее результат.\n\n"
-        "Примеры:\n"
-        "• <i>Кофейня «Brew» в центре Москвы</i>\n"
-        "• <i>Портфолио веб-дизайнера, фрилансер</i>\n"
-        "• <i>Студия йоги в Петербурге</i>\n"
-        "• <i>Онлайн-курс по Python для начинающих</i>",
+        "Опиши всё в одном сообщении — я разберу сам что нужно. "
+        "Можно упомянуть:\n\n"
+        "• <i>Что за бизнес/проект</i>\n"
+        "• <i>Стиль</i> (минимализм, яркий, строгий, журнальный)\n"
+        "• <i>Цвета</i> (тёмная, тёплая, синяя, серая)\n"
+        "• <i>Секции</i> (меню, услуги, портфолио, контакты)\n"
+        "• <i>Что должна делать кнопка</i>\n\n"
+        "Пример:\n"
+        "<i>«Кофейня Brew в центре Москвы, тёплый минимализм, "
+        "тёмно-коричневая палитра, секции hero/меню/контакты, "
+        "кнопка «Записаться»»</i>",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="⏭ Пропустить", callback_data="brief:niche:skip"
-                    )
-                ],
                 [InlineKeyboardButton(text="📋 В меню", callback_data=CB_MENU)],
             ]
         ),
@@ -187,166 +190,67 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await message.answer("✦ Отменил. Жми кнопки в меню.")
 
 
-# ============== Multi-step brief handlers ==============
-
-CB_STYLE_PREFIX = "brief:style:"
-CB_PALETTE_PREFIX = "brief:palette:"
-CB_SECTION_PREFIX = "brief:sec:"
-CB_CTA_PREFIX = "brief:cta:"
+# ============== receive_prompt — single-prompt with progress message ==============
 
 
-def _style_keyboard() -> InlineKeyboardMarkup:
-    """Шаг 2: выбор стиля."""
-    rows = []
-    for key, info in brief.STYLES.items():
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=info["name"], callback_data=f"{CB_STYLE_PREFIX}{key}"
-                )
-            ]
-        )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="🎲 Случайный", callback_data=f"{CB_STYLE_PREFIX}random"
-            )
-        ]
-    )
-    rows.append([InlineKeyboardButton(text="📋 В меню", callback_data=CB_MENU)])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def _palette_keyboard() -> InlineKeyboardMarkup:
-    """Шаг 4: выбор палитры."""
-    rows = []
-    for key, info in brief.PALETTES.items():
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=info["name"], callback_data=f"{CB_PALETTE_PREFIX}{key}"
-                )
-            ]
-        )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="🎲 Случайная", callback_data=f"{CB_PALETTE_PREFIX}random"
-            )
-        ]
-    )
-    rows.append([InlineKeyboardButton(text="📋 В меню", callback_data=CB_MENU)])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def _sections_keyboard(selected: list[str]) -> InlineKeyboardMarkup:
-    """Шаг 3: секции (toggle)."""
-    rows = []
-    for key, label in brief.SECTIONS.items():
-        marker = "✓" if key in selected else " "
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"[{marker}] {label}",
-                    callback_data=f"{CB_SECTION_PREFIX}{key}",
-                )
-            ]
-        )
-    rows.append([InlineKeyboardButton(text="➡ Готово", callback_data="brief:sec:done")])
-    rows.append([InlineKeyboardButton(text="📋 В меню", callback_data=CB_MENU)])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def _cta_keyboard() -> InlineKeyboardMarkup:
-    """Шаг 5: CTA."""
-    rows = []
-    for key, label in brief.CTA_TEMPLATES.items():
-        rows.append(
-            [InlineKeyboardButton(text=label, callback_data=f"{CB_CTA_PREFIX}{key}")]
-        )
-    rows.append([InlineKeyboardButton(text="📋 В меню", callback_data=CB_MENU)])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-async def _go_to_step(callback: CallbackQuery, state: FSMContext, step: int) -> None:
-    """Перейти к следующему шагу брифа."""
-    msg = cast(Message, callback.message)
-    if step == 2:
-        await state.set_state(SiteFlow.waiting_for_style)
-        await msg.answer(
-            "<b>Шаг 2/7: Выбери стиль</b>\n\n" "Каждый стиль даёт свою атмосферу.",
-            reply_markup=_style_keyboard(),
-        )
-    elif step == 3:
-        data = await state.get_data()
-        selected = data.get("brief_sections", [])
-        await state.set_state(SiteFlow.waiting_for_sections)
-        await msg.answer(
-            "<b>Шаг 3/7: Какие секции нужны?</b>\n\n"
-            "Нажми на секцию чтобы добавить/убрать.",
-            reply_markup=_sections_keyboard(selected),
-        )
-    elif step == 4:
-        await state.set_state(SiteFlow.waiting_for_palette)
-        await msg.answer(
-            "<b>Шаг 4/7: Выбери палитру</b>\n\n" "Это цвета твоего сайта.",
-            reply_markup=_palette_keyboard(),
-        )
-    elif step == 5:
-        await state.set_state(SiteFlow.waiting_for_cta)
-        await msg.answer(
-            "<b>Шаг 5/7: Главная кнопка</b>\n\n" "Что должна делать главная кнопка?",
-            reply_markup=_cta_keyboard(),
-        )
-    elif step == 6:
-        await state.set_state(SiteFlow.waiting_for_hero)
-        await msg.answer(
-            "<b>Шаг 6/7: Hero-текст</b>\n\n"
-            "Напиши главный заголовок и подзаголовок для первого экрана. "
-            "Через «|» раздели заголовок и подзаголовок.\n\n"
-            "Пример: <i>Кофейня Brew | Уютное место в центре Москвы</i>",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="📋 В меню", callback_data=CB_MENU)]
-                ]
-            ),
-        )
-
-
-async def _generate_from_brief(
-    source, state: FSMContext, brief_data: brief.BriefData
-) -> None:
-    """Сгенерировать сайт из собранного брифа."""
-    tg_id = (
-        source.from_user.id
-        if hasattr(source, "from_user") and source.from_user
-        else None
-    )
-    if tg_id is None:
+@router.message(SiteFlow.waiting_for_prompt)
+async def receive_prompt(message: Message, state: FSMContext) -> None:
+    """User sent a prompt: parse → generate → save → deploy → preview, with progress."""
+    if not message.text or not message.text.strip():
+        await message.answer("Пришли текстом описание сайта.")
         return
 
-    if hasattr(source, "message") and source.message:
-        msg = cast(Message, source.message)
-    else:
-        msg = cast(Message, source)
+    prompt = message.text.strip()
+    tg_id = message.from_user.id if message.from_user else 0
+    chat_id = message.chat.id
 
     await state.set_state(SiteFlow.generating)
-    await state.update_data(brief_prompt=brief_data.to_prompt())
+    await state.update_data(prompt=prompt)
 
-    await msg.answer(
-        "✦ <b>Генерирую сайт…</b>\n\n"
-        f"Бриф:\n<tg-spoiler>{brief_data.to_prompt()[:300]}…</tg-spoiler>\n\n"
-        "Обычно 15–40 секунд."
+    # ===== ProgressMessage — одно сообщение которое обновляется =====
+    from bot.services.progress_message import ProgressMessage
+
+    progress = ProgressMessage(message.bot, chat_id)
+    await progress.start(
+        "🔍 <b>Анализирую запрос…</b>\n\n"
+        f"<tg-spoiler>{prompt[:200]}{'…' if len(prompt) > 200 else ''}</tg-spoiler>"
+    )
+
+    # ===== Этап 1: парсинг и обогащение =====
+    await asyncio.sleep(0.4)
+    enriched = enrich_prompt(prompt)
+    await progress.update(
+        "🎨 <b>Подбираю стиль и палитру…</b>\n\n"
+        f"• Ниша: <i>{enriched['niche'][:60]}</i>\n"
+        f"• Стиль: <i>{enriched['style_name']}</i>\n"
+        f"• Палитра: <i>{enriched['palette_name']}</i>\n"
+        f"• Секции: <i>{', '.join(enriched['sections'])}</i>\n"
+        f"• CTA: <i>{enriched['cta_label']}</i>"
+    )
+
+    # ===== Этап 2: подготовка промта =====
+    await asyncio.sleep(0.3)
+    full_prompt = enriched["to_prompt"]()
+    await progress.update(
+        "🏗 <b>Строю структуру сайта…</b>\n\n"
+        f"• HTML-структура: <i>{len(enriched['sections'])} секций</i>\n"
+        f"• CSS-переменные: <i>палитра {enriched['palette_name']}</i>\n"
+        f"• JS-интерактив: <i>hover, scroll, transitions</i>\n\n"
+        "Готовлю детальный промт для модели…"
+    )
+
+    # ===== Этап 3: реальная LLM-генерация =====
+    await asyncio.sleep(0.3)
+    await progress.update(
+        "✨ <b>Генерирую HTML/CSS/JS…</b>\n\n" "Модель пишет код. Обычно 15–40 секунд."
     )
 
     try:
-        site = await site_generator.generate_site(prompt=brief_data.to_prompt())
-        # Извлекаем HTML из сгенерированного сайта
+        site = await site_generator.generate_site(prompt=full_prompt)
         if not site.files:
-            await msg.answer("⚠️ LLM не вернул файлы. Попробуй ещё раз.")
+            await progress.fail("LLM не вернул файлы. Попробуй переформулировать.")
             await state.clear()
             return
-        # Берём index.html или первый html-файл
         html_file = next(
             (f for f in site.files if f.path.endswith(".html")),
             site.files[0],
@@ -354,58 +258,54 @@ async def _generate_from_brief(
         html_content = html_file.content
     except Exception as exc:  # noqa: BLE001
         logger.exception("generation failed")
-        await msg.answer(f"⚠️ Ошибка генерации: {str(exc)[:200]}")
+        await progress.fail(f"Ошибка генерации: {str(exc)[:200]}")
         await state.clear()
         return
 
-    # Save site
+    # ===== Этап 4: проверка качества =====
+    await progress.update("🔍 <b>Проверяю качество…</b>\n\nОцениваю по 7 критериям…")
+    await asyncio.sleep(0.3)
+    try:
+        score = quality.score_site(html_content)
+        quality_text = quality.format_score_for_user(score)
+        score_line = f"<b>{score.overall}/10</b>"
+    except Exception:  # noqa: BLE001
+        logger.exception("quality scoring failed")
+        quality_text = ""
+        score_line = "—"
+        score = None
+
+    # ===== Этап 5: сохранение в БД =====
+    await progress.update(
+        "💾 <b>Сохраняю в базу…</b>\n\n"
+        f"Качество: {score_line}\n"
+        f"Размер: <i>{len(html_content) // 1024}KB</i>"
+    )
     site_id = await database.save_site_from_html(
         tg_user_id=tg_id,
-        name=brief_data.niche or "Untitled",
-        prompt=brief_data.to_prompt(),
+        name=enriched["niche"][:80],
+        prompt=full_prompt,
         html_content=html_content,
     )
     if not site_id:
-        await msg.answer("⚠️ Не удалось сохранить сайт. Попробуй ещё раз.")
+        await progress.fail("Не удалось сохранить сайт. Попробуй ещё раз.")
         await state.clear()
         return
 
-    # Deploy to preview
+    # ===== Этап 6: деплой превью =====
+    await progress.update("📦 <b>Деплою превью…</b>\n\nКопирую в public dir…")
     files_for_preview = [{"path": "index.html", "content": html_content}]
     preview_result = await preview.deploy_preview(
         tg_user_id=tg_id,
         site_id=site_id,
         files=files_for_preview,
-        project_name=brief_data.niche or "Untitled",
+        project_name=enriched["niche"][:80],
     )
+    if not preview_result.success:
+        await progress.fail(f"Деплой упал: {preview_result.error[:200]}")
+        await state.clear()
+        return
     preview_url = preview_result.url
-
-    # Quality scoring
-    quality_buttons: list[list[InlineKeyboardButton]] = []
-    quality_text = ""
-    try:
-        score = quality.score_site(html_content)
-        quality_text = "\n\n" + quality.format_score_for_user(score)
-        if score.overall < 6.5:
-            quality_buttons.append(
-                [
-                    InlineKeyboardButton(
-                        text="🔄 Перегенерировать",
-                        callback_data=CB_RETRY,
-                    )
-                ]
-            )
-        else:
-            quality_buttons.append(
-                [
-                    InlineKeyboardButton(
-                        text="✅ Принять и опубликовать",
-                        callback_data=CB_DONE,
-                    )
-                ]
-            )
-    except Exception:  # noqa: BLE001
-        logger.exception("quality scoring failed")
 
     # Save version v1
     try:
@@ -413,14 +313,27 @@ async def _generate_from_brief(
     except Exception:  # noqa: BLE001
         logger.exception("save_version v1 failed")
 
+    # ===== Готово — обновляем state + показываем финальный экран =====
     await state.set_state(SiteFlow.preview)
     await state.update_data(
         site_id=site_id,
         preview_url=preview_url,
         current_files=files_for_preview,
         current_version="v1",
-        project_name=brief_data.niche or "Untitled",
+        project_name=enriched["niche"][:80],
     )
+
+    # Качество → кнопка
+    quality_buttons: list[list[InlineKeyboardButton]] = []
+    if score is not None and score.overall < 6.5:
+        quality_buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="🔄 Перегенерировать",
+                    callback_data=CB_RETRY,
+                )
+            ]
+        )
 
     buttons = quality_buttons + [
         [InlineKeyboardButton(text="✏️ Исправить", callback_data=CB_EDIT)],
@@ -435,219 +348,12 @@ async def _generate_from_brief(
         [InlineKeyboardButton(text="📋 В меню", callback_data=CB_MENU)],
     ]
 
-    await msg.answer(
-        f"✦ <b>Сайт готов!</b>\n\n"
-        f"🌐 Превью: <code>{preview_url}</code>{quality_text}",
+    await progress.finish(
+        f"✦ <b>Готово!</b>\n\n"
+        f"🌐 Превью: <code>{preview_url}</code>\n\n"
+        f"{quality_text}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
     )
-
-
-# ===== Step 1: Niche =====
-
-
-@router.callback_query(F.data == "brief:niche:skip")
-async def cb_brief_niche_skip(callback: CallbackQuery, state: FSMContext) -> None:
-    """Пропустить нишу — пусть LLM придумает."""
-    await state.update_data(brief_niche="универсальный лендинг")
-    await callback.answer("Ок")
-    await _go_to_step(callback, state, 2)
-
-
-@router.message(SiteFlow.waiting_for_niche)
-async def receive_niche(message: Message, state: FSMContext) -> None:
-    """Получить нишу от юзера."""
-    if not message.text:
-        await message.answer("Пришли текстом, что за сайт.")
-        return
-    await state.update_data(brief_niche=message.text.strip())
-    await message.answer(
-        "✦ Принял: <b>" + message.text.strip()[:80] + "</b>",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="➡ Дальше", callback_data="brief:niche:next"
-                    )
-                ],
-                [InlineKeyboardButton(text="📋 В меню", callback_data=CB_MENU)],
-            ]
-        ),
-    )
-
-
-@router.callback_query(F.data == "brief:niche:next")
-async def cb_brief_niche_next(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
-    await _go_to_step(callback, state, 2)
-
-
-# ===== Step 2: Style =====
-
-
-@router.callback_query(F.data.startswith(CB_STYLE_PREFIX))
-async def cb_brief_style(callback: CallbackQuery, state: FSMContext) -> None:
-    style_key = (callback.data or "").replace(CB_STYLE_PREFIX, "")
-    if style_key == "random":
-        import random
-
-        style_key = random.choice(list(brief.STYLES.keys()))
-    await state.update_data(brief_style=style_key)
-    await callback.answer(f"Стиль: {brief.STYLES[style_key]['name']}")
-    await _go_to_step(callback, state, 3)
-
-
-# ===== Step 3: Sections =====
-
-
-@router.callback_query(F.data.startswith(CB_SECTION_PREFIX))
-async def cb_brief_section(callback: CallbackQuery, state: FSMContext) -> None:
-    section = (callback.data or "").replace(CB_SECTION_PREFIX, "")
-    if section == "done":
-        data = await state.get_data()
-        selected = data.get("brief_sections", [])
-        if not selected:
-            await callback.answer("Выбери хотя бы одну секцию", show_alert=True)
-            return
-        await callback.answer("Ок")
-        await _go_to_step(callback, state, 4)
-        return
-
-    data = await state.get_data()
-    selected: list[str] = list(data.get("brief_sections", []))
-    if section in selected:
-        selected.remove(section)
-    else:
-        selected.append(section)
-    await state.update_data(brief_sections=selected)
-
-    try:
-        await cast(Message, callback.message).edit_reply_markup(
-            reply_markup=_sections_keyboard(selected)
-        )
-    except Exception:  # noqa: BLE001
-        pass
-    await callback.answer(f"Секции: {len(selected)}")
-
-
-# ===== Step 4: Palette =====
-
-
-@router.callback_query(F.data.startswith(CB_PALETTE_PREFIX))
-async def cb_brief_palette(callback: CallbackQuery, state: FSMContext) -> None:
-    palette_key = (callback.data or "").replace(CB_PALETTE_PREFIX, "")
-    if palette_key == "random":
-        import random
-
-        palette_key = random.choice(list(brief.PALETTES.keys()))
-    await state.update_data(brief_palette=palette_key)
-    await callback.answer(f"Палитра: {brief.PALETTES[palette_key]['name']}")
-    await _go_to_step(callback, state, 5)
-
-
-# ===== Step 5: CTA =====
-
-
-@router.callback_query(F.data.startswith(CB_CTA_PREFIX))
-async def cb_brief_cta(callback: CallbackQuery, state: FSMContext) -> None:
-    cta_key = (callback.data or "").replace(CB_CTA_PREFIX, "")
-    await state.update_data(brief_cta=cta_key)
-    await callback.answer(f"CTA: {brief.CTA_TEMPLATES[cta_key]}")
-    await _go_to_step(callback, state, 6)
-
-
-# ===== Step 6: Hero =====
-
-
-@router.message(SiteFlow.waiting_for_hero)
-async def receive_hero(message: Message, state: FSMContext) -> None:
-    if not message.text:
-        await message.answer("Пришли текстом hero-строку.")
-        return
-    await state.update_data(brief_hero=message.text.strip())
-    await state.set_state(SiteFlow.waiting_for_file)
-    await message.answer(
-        "✦ Принял!\n\n"
-        "<b>Шаг 7/7: Файл с ТЗ (опционально)</b>\n\n"
-        "Если есть подробное ТЗ в .txt / .md / .pdf — прикрепи файл. "
-        "Если нет — нажми «🚀 Генерировать».",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🚀 Генерировать", callback_data="brief:gen"
-                    )
-                ],
-                [InlineKeyboardButton(text="📋 В меню", callback_data=CB_MENU)],
-            ]
-        ),
-    )
-
-
-# ===== Step 7: File (optional) =====
-
-
-@router.message(SiteFlow.waiting_for_file, F.document)
-async def receive_brief_file(message: Message, state: FSMContext) -> None:
-    """Скачать файл и сохранить содержимое в бриф."""
-    if not message.document:
-        return
-    try:
-        text, filename = await file_prompts.download_and_extract(
-            cast(Any, message.bot), message.document
-        )
-    except ValueError as exc:
-        await message.answer(f"⚠️ {exc}")
-        return
-    except Exception:  # noqa: BLE001
-        logger.exception("file download failed")
-        await message.answer("⚠️ Не удалось прочитать файл.")
-        return
-
-    await state.update_data(
-        brief_extra_text=text,
-        brief_extra_filename=filename,
-    )
-    await message.answer(
-        f"✦ Файл <b>{filename}</b> принят ({len(text):,} символов).\n\n"
-        "Жми «🚀 Генерировать».",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🚀 Генерировать", callback_data="brief:gen"
-                    )
-                ],
-                [InlineKeyboardButton(text="📋 В меню", callback_data=CB_MENU)],
-            ]
-        ),
-    )
-
-
-# ===== Generate from brief =====
-
-
-@router.callback_query(F.data == "brief:gen")
-async def cb_brief_generate(callback: CallbackQuery, state: FSMContext) -> None:
-    """Собрать бриф и запустить генерацию."""
-    data = await state.get_data()
-    bd = brief.BriefData(
-        user_id=callback.from_user.id if callback.from_user else 0,
-        niche=data.get("brief_niche"),
-        style=data.get("brief_style"),
-        sections=data.get("brief_sections", []),
-        palette=data.get("brief_palette"),
-        cta=data.get("brief_cta"),
-        hero_text=data.get("brief_hero"),
-        extra_file_text=data.get("brief_extra_text"),
-        extra_filename=data.get("brief_extra_filename"),
-    )
-    missing = bd.missing_fields()
-    if missing:
-        await callback.answer(f"Не хватает: {', '.join(missing)}", show_alert=True)
-        return
-
-    await callback.answer("Запускаю генерацию…")
-    await _generate_from_brief(callback, state, bd)
 
 
 @router.callback_query(F.data == CB_MENU)

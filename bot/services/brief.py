@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -176,3 +177,275 @@ def get_brief(user_id: int) -> BriefData:
 def clear_brief(user_id: int) -> None:
     """Очистить бриф (после генерации или отмены)."""
     _briefs.pop(user_id, None)
+
+
+# ============== enrich_prompt — rule-based парсер промта ==============
+
+
+# Ключевые слова → стили
+_STYLE_KEYWORDS = {
+    "vibrant": [
+        "ярк",
+        "ярко",
+        "цветн",
+        "сочн",
+        "пёстр",
+        "весел",
+        "агрессивн",
+        "vibrant",
+        "яркий",
+        "яркая",
+        "яркое",
+        "кислот",
+    ],
+    "minimalist": [
+        "минимал",
+        "лаконич",
+        "чист",
+        "прост",
+        "спокойн",
+        "воздушн",
+        "minimalist",
+        "minimal",
+        "чистый",
+        "чистая",
+    ],
+    "editorial": [
+        "журнал",
+        "стать",
+        "издани",
+        "длинн",
+        "много текст",
+        "editorial",
+        "magazine",
+        "editorial-style",
+        "лонгрид",
+    ],
+    "brutalist": [
+        "брутал",
+        "груб",
+        "строг",
+        "industrial",
+        "loft",
+        "хай-тек",
+        "сыр",
+        "бетон",
+        "контрастн",
+        "brutalist",
+    ],
+}
+
+# Ключевые слова → палитры
+_PALETTE_KEYWORDS = {
+    "midnight_ocean": [
+        "тёмн",
+        "темн",
+        "ночн",
+        "moonlight",
+        "midnight",
+        "blue",
+        "синий",
+        "cyan",
+        "голуб",
+        "ocean",
+        "океан",
+        "глубок",
+    ],
+    "sunset_warm": [
+        "тёпл",
+        "тепл",
+        "оранж",
+        "закат",
+        "sunset",
+        "warm",
+        "красн",
+        "коралл",
+        "оранжев",
+    ],
+    "nordic_cool": [
+        "скандинав",
+        "nordic",
+        "северн",
+        "холодн",
+        "cool",
+        "серо-бел",
+        "бежев",
+        "светл-сер",
+    ],
+    "earth_tones": [
+        "земл",
+        "природ",
+        "earth",
+        "оливк",
+        "песочн",
+        "коричнев",
+        "беж",
+        "натуральн",
+        "эко",
+    ],
+}
+
+# Секции — что нужно
+_SECTION_KEYWORDS = {
+    "hero": ["hero", "главн", "первый экран", "обложк"],
+    "about": ["о нас", "о себе", "обо мне", "о студии", "о компан", "about"],
+    "services": [
+        "услуг",
+        "service",
+        "сервис",
+        "предложен",
+        "что мы дела",
+        "продукт",
+        "тариф",
+        "цены",
+        "пакет",
+    ],
+    "portfolio": [
+        "портфолио",
+        "portfolio",
+        "кейс",
+        "работ",
+        "проект",
+        "gallery",
+        "галерея",
+        "пример",
+    ],
+    "contacts": [
+        "контакт",
+        "связ",
+        "адрес",
+        "телефон",
+        "обратн",
+        "форма",
+        "contact",
+        "обратная связь",
+        "напишите",
+    ],
+    "blog": ["блог", "стать", "новост", "blog", "article"],
+    "menu": ["меню", "menu", "блюд", "кафе", "ресторан", "кофейн", "кухн"],
+    "team": ["команд", "сотрудник", "team", "о нас с фот", "наша команд"],
+    "testimonials": ["отзыв", "review", "testimonial", "рекомендац"],
+}
+
+# CTA — кнопки
+_CTA_KEYWORDS = {
+    "book": ["записаться", "запись", "бронир", "book", "appointment"],
+    "buy": ["купить", "заказать", "оформить", "buy", "order", "корзин"],
+    "contact": ["связаться", "написать", "позвонить", "contact", "обратн"],
+    "subscribe": ["подписаться", "подписка", "subscribe", "newsletter"],
+    "download": ["скачать", "download", "загрузить", "pdf", "презентац"],
+    "menu": ["меню", "menu", "блюда", "смотреть меню"],
+}
+
+_DEFAULT_SECTIONS = ["hero", "about", "services", "contacts"]
+
+
+def enrich_prompt(prompt: str) -> dict:
+    """Парсит свободный промт юзера в структуру для LLM.
+
+    Returns:
+        dict with keys:
+          - niche: str
+          - style, style_name
+          - palette, palette_name
+          - sections: list[str]
+          - cta, cta_label
+          - to_prompt: callable — собирает полный промт
+    """
+    p_lower = prompt.lower()
+
+    # Стиль — кто первый совпал
+    style = "minimalist"
+    style_score = 0
+    for st, keywords in _STYLE_KEYWORDS.items():
+        for kw in keywords:
+            if kw in p_lower:
+                if len(kw) > style_score:
+                    style = st
+                    style_score = len(kw)
+                break
+
+    # Палитра
+    palette = "midnight_ocean"
+    palette_score = 0
+    for pl, keywords in _PALETTE_KEYWORDS.items():
+        for kw in keywords:
+            if kw in p_lower:
+                if len(kw) > palette_score:
+                    palette = pl
+                    palette_score = len(kw)
+                break
+
+    # Секции — все совпавшие
+    sections: list[str] = ["hero"]  # hero всегда
+    for sec, keywords in _SECTION_KEYWORDS.items():
+        for kw in keywords:
+            if kw in p_lower:
+                if sec not in sections:
+                    sections.append(sec)
+                break
+    if sections == ["hero"]:
+        # ничего не нашли — дефолт
+        sections = _DEFAULT_SECTIONS.copy()
+
+    # CTA
+    cta = "contact"
+    cta_score = 0
+    for ct, keywords in _CTA_KEYWORDS.items():
+        for kw in keywords:
+            if kw in p_lower:
+                if len(kw) > cta_score:
+                    cta = ct
+                    cta_score = len(kw)
+                break
+
+    # Ниша — берём первую фразу (до запятой) или первые 5 слов
+    niche_match = re.split(r"[,.]", prompt, maxsplit=1)
+    niche = niche_match[0].strip() if niche_match else prompt.strip()
+    if len(niche) > 60:
+        niche = " ".join(niche.split()[:5])
+
+    # Hero-текст — генерим дефолт если не указан
+    hero_line = f"{niche.title()} | Качественно, быстро, удобно"
+
+    style_info = STYLES[style]
+    palette_info = PALETTES[palette]
+    cta_label = CTA_TEMPLATES[cta]
+
+    def to_prompt() -> str:
+        return f"""Ниша: {prompt}
+
+Стиль: {style_info['name']} ({style_info['desc']})
+
+Секции: {', '.join(sections)}
+
+Палитра: {palette_info['name']} — {palette_info['colors']}
+Описание палитры: {palette_info['desc']}
+
+CTA (текст кнопки): {cta_label}
+
+Hero-текст: {hero_line}
+
+Сгенерируй современный, стильный сайт. Используй:
+- Качественную типографику (Inter/Space Grotesk для body, Fraunces/Playfair для заголовков)
+- Микро-анимации (hover effects, scroll animations, smooth transitions)
+- Реальные фотографии через https://images.unsplash.com (URL.unsplash.com/photo-ID)
+- Mobile-first responsive design
+- Anti-slop: никаких emoji-цепочек, синих CTA, stock-photo-фраз
+- Визуальная иерархия: чёткий hero, breathable whitespace, длинные тексты
+- Движение: hover-эффекты, scroll animations, scroll-triggered reveals
+- Плотность: достаточно контента чтобы сайт выглядел наполненным, не пустым
+"""
+
+    return {
+        "niche": niche,
+        "style": style,
+        "style_name": style_info["name"],
+        "palette": palette,
+        "palette_name": palette_info["name"],
+        "sections": sections,
+        "cta": cta,
+        "cta_label": cta_label,
+        "to_prompt": to_prompt,
+        "hero_line": hero_line,
+    }
