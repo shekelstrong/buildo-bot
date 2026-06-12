@@ -67,7 +67,7 @@ async def _send_scene_with_text(
     caption: str,
     reply_markup: InlineKeyboardMarkup | None = None,
     parse_mode: str = "HTML",
-) -> None:
+) -> Message | None:
     """Send a scene PNG as a photo WITH caption + buttons as ONE message.
 
     Falls back to a plain-text `answer()` if:
@@ -75,6 +75,9 @@ async def _send_scene_with_text(
       - Telegram rejects the photo (e.g. IMAGE_PROCESS_FAILED)
     In both cases the user sees exactly ONE message — either photo+caption
     or text+buttons, never two separate bubbles.
+
+    Returns the sent Message so the caller can later edit it
+    (e.g. for progress updates).
     """
     try:
         png = get_scene(scene_name)
@@ -84,18 +87,17 @@ async def _send_scene_with_text(
 
     if png:
         try:
-            await message.answer_photo(
+            return await message.answer_photo(
                 photo=BufferedInputFile(png, filename=f"{scene_name}.png"),
                 caption=caption,
                 parse_mode=parse_mode,
                 reply_markup=reply_markup,
             )
-            return
         except Exception:  # noqa: BLE001
             logger.exception("answer_photo with caption failed, falling back to text")
 
     # Fallback: single plain-text message (no photo)
-    await message.answer(
+    return await message.answer(
         caption,
         parse_mode=parse_mode,
         reply_markup=reply_markup,
@@ -281,7 +283,7 @@ async def cb_menu_site(callback: CallbackQuery, state: FSMContext) -> None:
         "тёмно-коричневая палитра, секции hero/меню/контакты, "
         "кнопка «Записаться»»</i>"
     )
-    await _send_scene_with_text(
+    sent = await _send_scene_with_text(
         msg,
         "generating",
         caption,
@@ -291,6 +293,13 @@ async def cb_menu_site(callback: CallbackQuery, state: FSMContext) -> None:
             ]
         ),
     )
+    # Запоминаем message_id сцены в state, чтобы receive_prompt мог
+    # обновить именно это сообщение вместо отправки нового.
+    if sent is not None:
+        try:
+            await state.update_data(preview_message_id=sent.message_id)
+        except Exception:  # noqa: BLE001
+            pass
     await callback.answer()
 
 

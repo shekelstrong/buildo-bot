@@ -41,6 +41,25 @@ class ProgressMessage:
         self._typing_task: Optional[asyncio.Task] = None
         self._stop_typing = asyncio.Event()
 
+    async def attach_to_last_bot_message(self) -> bool:
+        """Bind to a previously-sent bot message by ID.
+
+        This is a no-op when no message_id is set; the caller must
+        pass it via `attach(message_id)`. Kept for API symmetry.
+        """
+        return self._message is not None
+
+    async def attach(self, message: Message) -> None:
+        """Bind to an already-sent message (no new message created).
+
+        Subsequent update()/finish()/fail() will edit THIS message
+        instead of sending a new one.
+        """
+        self._message = message
+        self._current_text = message.text or message.caption or ""
+        # No typing loop needed — message already exists
+        self._stop_typing.set()
+
     async def start(
         self, text: str, reply_markup: InlineKeyboardMarkup | None = None
     ) -> None:

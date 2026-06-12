@@ -202,19 +202,43 @@ async def receive_prompt(message: Message, state: FSMContext) -> None:
 
     prompt = message.text.strip()
     tg_id = message.from_user.id if message.from_user else 0
-    chat_id = message.chat.id
 
     await state.set_state(SiteFlow.generating)
     await state.update_data(prompt=prompt)
 
-    # ===== ProgressMessage — одно сообщение которое обновляется =====
+    # ===== ProgressMessage — обновляем то же сообщение, что показал
+    # cb_menu_site ("Создаём новый сайт"), а не шлём новое =====
     from bot.services.progress_message import ProgressMessage
 
-    progress = ProgressMessage(message.bot, chat_id)
-    await progress.start(
+    state_data = await state.get_data()
+    preview_msg_id = state_data.get("preview_message_id")
+    progress = ProgressMessage(message.bot, message.chat.id if message.chat else 0)
+
+    initial_text = (
         "🔍 <b>Анализирую запрос…</b>\n\n"
         f"<tg-spoiler>{prompt[:200]}{'…' if len(prompt) > 200 else ''}</tg-spoiler>"
     )
+
+    if preview_msg_id is not None and message.chat is not None:
+        # Привязываемся к scene-сообщению из cb_menu_site — обновляем
+        # его caption вместо отправки нового сообщения. У photo caption
+        # лимит 1024, текст влезает.
+        try:
+            sent_msg = await message.bot.edit_message_caption(
+                chat_id=message.chat.id,
+                message_id=preview_msg_id,
+                caption=initial_text,
+                parse_mode="HTML",
+            )
+            if sent_msg is not None:
+                await progress.attach(sent_msg)
+        except Exception:  # noqa: BLE001
+            # Если не получилось (фото удалено, no caption support, etc) —
+            # fallback на новое сообщение
+            await progress.start(initial_text)
+    else:
+        # Нет сохранённого message_id — fallback
+        await progress.start(initial_text)
 
     # ===== Этап 1: парсинг и обогащение =====
     await asyncio.sleep(0.4)
