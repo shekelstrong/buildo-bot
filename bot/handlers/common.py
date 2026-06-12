@@ -171,31 +171,47 @@ async def cb_menu_home(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "menu:site")
 async def cb_menu_site(callback: CallbackQuery, state: FSMContext) -> None:
-    """Inline button 'Создать сайт' — runs /site flow (sets FSM state)."""
-    # Lazy import to avoid circular dependency at module load
-    from bot.handlers.site_builder import SiteFlow
-
-    await state.clear()
-    await state.set_state(SiteFlow.waiting_for_prompt)
+    """Inline button 'Создать сайт' — runs multi-step /site flow."""
     if callback.message is None:
         await callback.answer()
         return
     msg = cast(Message, callback.message)
+
+    # Lazy import to avoid circular dependency
+    from bot.handlers.site_builder import SiteFlow
+
+    await state.clear()
+    await state.set_state(SiteFlow.waiting_for_niche)
+    await state.update_data(brief_sections=[])
+
     try:
-        await _send_scene(msg, "generating")
+        from bot.services.scenes import get_scene
+        png = get_scene("generating")
+        await msg.answer_photo(
+            photo=BufferedInputFile(png, filename="generating.png"),
+            caption="",
+        )
     except Exception:  # noqa: BLE001
         pass
+
     await msg.answer(
         "✦ <b>Создаём новый сайт</b>\n\n"
-        "Опиши словами, что нужно сделать. Чем подробнее — тем точнее результат.\n\n"
+        "<b>Шаг 1/7: Расскажи про бизнес/проект</b>\n\n"
+        "Что это за сайт, для кого, какая цель? "
+        "Чем конкретнее — тем точнее результат.\n\n"
         "Примеры:\n"
-        "<i>«лендинг для кофейни в центре Москвы, тёплый минимализм, "
-        "секции: hero, меню, контакты»</i>\n"
-        "<i>«портфолио веб-дизайнера с кейсами и контактами, тёмная тема»</i>\n"
-        "<i>«сайт-визитка для автосервиса, серьёзный стиль, форма записи»</i>\n\n"
-        "/cancel — отмена"
+        "• <i>Кофейня «Brew» в центре Москвы</i>\n"
+        "• <i>Портфолио веб-дизайнера, фрилансер</i>\n"
+        "• <i>Студия йоги в Петербурге</i>\n"
+        "• <i>Онлайн-курс по Python для начинающих</i>",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⏭ Пропустить", callback_data="brief:niche:skip")],
+                [InlineKeyboardButton(text="📋 В меню", callback_data="sb:menu")],
+            ]
+        ),
     )
-    await callback.answer("Опиши сайт")
+    await callback.answer()
 
 
 @router.callback_query(F.data == "menu:sites")
