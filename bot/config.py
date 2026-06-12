@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     # ===== GitHub (export sites to shared repo for Pages hosting) =====
     github_token: str = "dummy_github_token"
 
+    # ===== Encryption (Fernet key for user GitHub tokens at rest) =====
+    encryption_key: str = ""
+
     # ===== reg.ru (domains) =====
     regru_api_login: str = ""
     regru_api_password: str = ""

@@ -384,3 +384,88 @@ async def log_action(
                 )
     except Exception as exc:  # noqa: BLE001
         logger.warning("log_action failed: %s", exc)
+
+
+# ============== Multi-step brief: minimal save (HTML only) ==============
+
+
+async def save_site_from_html(
+    tg_user_id: int,
+    name: str,
+    prompt: str,
+    html_content: str,
+) -> str | None:
+    """Сохранить сайт от multi-step брифа. Возвращает site_id (UUID) или None.
+
+    Создаёт user если не существует, потом project + site.
+    """
+    pool = await get_pool()
+    if pool is None:
+        logger.warning("save_site_from_html: no DB pool")
+        return None
+
+    try:
+        async with pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                # 1) ensure user
+                await cur.execute(
+                    "SELECT id FROM users WHERE tg_user_id = %s",
+                    (tg_user_id,),
+                )
+                row = await cur.fetchone()
+                if row:
+                    user_id = row["id"]
+                else:
+                    await cur.execute(
+                        """
+                        INSERT INTO users (tg_user_id, language)
+                        VALUES (%s, 'ru')
+                        RETURNING id
+                        """,
+                        (tg_user_id,),
+                    )
+                    user_id = (await cur.fetchone())["id"]
+
+                # 2) project
+                size_kb = round(len(html_content.encode("utf-8")) / 1024.0, 2)
+                await cur.execute(
+                    """
+                    INSERT INTO projects (user_id, project_name, framework, prompt,
+                                          files_count, size_kb, preview_summary)
+                    VALUES (%s, %s, %s, %s, 1, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        user_id,
+                        name[:120],
+                        "static-html",
+                        prompt,
+                        size_kb,
+                        f"{size_kb}KB",
+                    ),
+                )
+                project_id = (await cur.fetchone())["id"]
+
+                # 3) site
+                await cur.execute(
+                    """
+                    INSERT INTO sites (user_id, project_id, project_name,
+                                       deploy_target, deploy_url, status, last_deploy_at)
+                    VALUES (%s, %s, %s, 'self-host', '', 'deployed', now())
+                    RETURNING id
+                    """,
+                    (user_id, project_id, name[:120]),
+                )
+                site_id = str((await cur.fetchone())["id"])
+
+                await conn.commit()
+                logger.info(
+                    "save_site_from_html ok tg=%d site=%s size=%.1fKB",
+                    tg_user_id,
+                    site_id,
+                    size_kb,
+                )
+                return site_id
+    except Exception:  # noqa: BLE001
+        logger.exception("save_site_from_html failed")
+        return None
