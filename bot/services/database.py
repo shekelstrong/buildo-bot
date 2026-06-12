@@ -451,7 +451,7 @@ async def save_site_from_html(
                     """
                     INSERT INTO sites (user_id, project_id, project_name,
                                        deploy_target, deploy_url, status, last_deploy_at)
-                    VALUES (%s, %s, %s, 'self-host', '', 'deployed', now())
+                    VALUES (%s, %s, %s, 'layero', '', 'deployed', now())
                     RETURNING id
                     """,
                     (user_id, project_id, name[:120]),
