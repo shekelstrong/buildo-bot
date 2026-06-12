@@ -1,32 +1,67 @@
-"""/admin — admin-only commands. Single-admin MVP (ADMIN_TG_ID)."""
+"""/admin — admin-only commands. Single-admin MVP (ADMIN_TG_ID).
+
+Includes AI-agent /admin_edit which lets the admin describe a small
+textual change in Russian, get a proposal back, then /admin_apply to
+commit + push (CI/CD then deploys).
+"""
 
 from __future__ import annotations
 
+import logging
+
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from bot.services import admin as admin_service
+from bot.services import bot_self_editor
+
+logger = logging.getLogger(__name__)
 
 router = Router(name="admin")
+
+
+class AdminEditFlow(StatesGroup):
+    """FSM for AI-edit flow."""
+
+    waiting_for_request = State()
+    reviewing_proposal = State()
 
 
 @router.message(Command("admin"))
 async def cmd_admin(message: Message) -> None:
     """Admin menu — only ADMIN_TG_ID gets here (filter on router)."""
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✦ AI-агент правок", callback_data="admin:edit"
+                )
+            ],
+            [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
+            [InlineKeyboardButton(text="👥 Юзеры", callback_data="admin:users")],
+            [InlineKeyboardButton(text="💰 Платежи", callback_data="admin:pays")],
+        ]
+    )
     text = (
         "🔐 <b>Buildo Admin Panel</b>\n\n"
-        "<b>Доступные команды:</b>\n"
-        "/admin_stats — статистика (юзеры, сайты, платежи)\n"
-        "/admin_users — список юзеров (последние 50)\n"
-        "/admin_payments — последние платежи\n"
-        "/admin_broadcast — рассылка сообщения всем юзерам\n"
-        "/admin_promo — создать промокод\n"
-        "/admin_logs — последние ошибки\n"
-        "/admin_redeploy &lt;site_id&gt; — ручной re-деплой сайта\n"
-        "/admin_kill &lt;user_id&gt; — бан юзера\n"
+        "<b>Кнопки:</b>\n"
+        "• ✦ AI-агент правок — описать правку, бот сам коммитит в GitHub\n"
+        "• 📊 Статистика — юзеры, сайты, платежи\n"
+        "• 👥 Юзеры — последние 50\n"
+        "• 💰 Платежи — последние 20\n\n"
+        "<b>Команды:</b>\n"
+        "/admin_stats /admin_users /admin_payments\n"
+        "/admin_broadcast /admin_redeploy /admin_kill /admin_logs"
     )
-    await message.answer(text)
+    await message.answer(text, reply_markup=kb)
 
 
 @router.message(Command("admin_stats"))
