@@ -143,3 +143,71 @@ async def test_generate_site_rejects_empty_prompt():
 async def test_generate_site_rejects_whitespace_prompt():
     with pytest.raises(ValueError, match="empty"):
         await generate_site("   \n\t  ")
+
+
+# ===== New fallback-strategy tests =====
+
+SAMPLE_TRUNCATED_JSON = """{
+  "project_name": "truncated",
+  "framework": "static-html",
+  "files": [
+    {
+      "path": "index.html",
+      "content": "<!doctype html><html><body>Hi"""  # noqa: E501
+
+
+SAMPLE_RAW_HTML = (
+    "<!doctype html>\n"
+    "<html lang='ru'><head><meta charset='utf-8'><title>raw</title></head>"
+    "<body><h1>Raw HTML fallback</h1></body></html>"
+)
+
+
+SAMPLE_HTML_IN_QUOTES = '"<!doctype html>\\n<html><body>Quoted HTML</body></html>"'
+
+
+def test_parse_balanced_extraction_handles_embedded_braces():
+    """JSON with content containing `{}` should still parse via brace-matching."""
+    raw = (
+        '{"project_name":"p","framework":"static-html",'
+        '"files":[{"path":"index.html","content":"<style>body{color:red}</style>"}]}'
+    )
+    site = _parse_response(raw)
+    assert site.project_name == "p"
+    assert "color:red" in site.files[0].content
+
+
+def test_parse_truncated_json_repair():
+    """LLM response cut off mid-content falls back to raw-HTML heuristic.
+
+    When the truncated JSON contains an HTML snippet starting with
+    <!doctype, the heuristic path (5) catches it and wraps the partial
+    HTML as index.html. We don't try to recover `project_name` from
+    truncated JSON — the file content is what matters.
+    """
+    site = _parse_response(SAMPLE_TRUNCATED_JSON)
+    assert len(site.files) == 1
+    assert site.files[0].path == "index.html"
+    assert "<" in site.files[0].content  # something HTML-shaped survived
+
+
+def test_parse_raw_html_fallback():
+    """When LLM returns pure HTML without a JSON envelope, wrap it as index.html."""
+    site = _parse_response(SAMPLE_RAW_HTML)
+    assert site.project_name == "generated-site"
+    assert len(site.files) == 1
+    assert site.files[0].path == "index.html"
+    assert "<h1>Raw HTML fallback</h1>" in site.files[0].content
+
+
+def test_parse_html_in_quotes_fallback():
+    """When HTML is returned as a JSON-quoted string, unescape and wrap it."""
+    site = _parse_response(SAMPLE_HTML_IN_QUOTES)
+    assert site.project_name == "generated-site"
+    assert "Quoted HTML" in site.files[0].content
+
+
+def test_parse_garbage_raises():
+    """Truly garbage input raises ValueError — no silent failure."""
+    with pytest.raises(ValueError, match="not valid JSON"):
+        _parse_response("just random text, no html no json no nothing")

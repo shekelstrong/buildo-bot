@@ -258,7 +258,11 @@ async def receive_prompt(message: Message, state: FSMContext) -> None:
         html_content = html_file.content
     except Exception as exc:  # noqa: BLE001
         logger.exception("generation failed")
-        await progress.fail(f"Ошибка генерации: {str(exc)[:200]}")
+        # Escape HTML so error snippets containing <!doctype> etc. don't
+        # break Telegram's parse_mode='HTML' in the message that follows.
+        from html import escape as _html_escape
+
+        await progress.fail(f"Ошибка генерации: {_html_escape(str(exc)[:200])}")
         await state.clear()
         return
 

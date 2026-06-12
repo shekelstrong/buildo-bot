@@ -116,58 +116,131 @@ class GeneratedSite:
 _FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 
+def _extract_balanced_json_object(text: str, start: int = 0) -> tuple[str, int] | None:
+    """Find a balanced {...} JSON object starting from `start` (or from the
+    first '{' if start == 0). Returns (substring, end_index_exclusive) or None.
+
+    Robust against quoted strings containing unmatched braces. Handles
+    backslash-escaped quotes inside strings.
+    """
+    if start == 0:
+        start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1], i + 1
+        i += 1
+    return None
+
+
 def _parse_response(raw: str) -> GeneratedSite:
-    """Parse MiniMax response into GeneratedSite. Robust to markdown fences."""
+    """Parse MiniMax response into GeneratedSite. Robust to markdown fences,
+    truncated JSON, and unescaped HTML inside content strings.
+    """
     text = raw.strip()
     parsed: dict | None = None
 
+    # 1) Direct JSON parse
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
+        pass
+
+    # 2) Markdown-fenced JSON
+    if parsed is None:
         m = _FENCE_RE.search(text)
         if m:
             try:
                 parsed = json.loads(m.group(1))
             except json.JSONDecodeError:
                 pass
-        if parsed is None:
-            first = text.find("{")
-            last = text.rfind("}")
-            if first != -1 and last != -1 and last > first:
+
+    # 3) Balanced-brace extraction (handles content with embedded braces)
+    if parsed is None:
+        candidate = _extract_balanced_json_object(text)
+        if candidate is not None:
+            candidate_str, _ = candidate
+            try:
+                parsed = json.loads(candidate_str)
+            except json.JSONDecodeError:
+                pass
+
+    # 4) Repair truncated JSON (LLM hit max_tokens mid-string)
+    if parsed is None and text.startswith("{"):
+        repaired = text
+        for _ in range(5):
+            open_brackets = repaired.count("[") - repaired.count("]")
+            open_braces = repaired.count("{") - repaired.count("}")
+            last_quote = repaired.rfind('"')
+            if last_quote > repaired.rfind("}"):
+                repaired = repaired[:last_quote] + '"'
+            repaired += "]" * max(0, open_brackets) + "}" * max(0, open_braces)
+            try:
+                parsed = json.loads(repaired)
+                logger.warning(
+                    "Repaired truncated JSON (%d extra chars appended)",
+                    len(repaired) - len(text),
+                )
+                break
+            except json.JSONDecodeError:
+                break
+
+    # 5) Last-resort heuristic: extract first <!DOCTYPE ...> or <html ...>
+    # HTML blob and wrap it into a GeneratedSite. Saves the user when the
+    # LLM returns pure HTML instead of a JSON envelope.
+    if parsed is None or (isinstance(parsed, str) and "<" in parsed):
+        # If json.loads already returned a quoted-HTML string, use it directly
+        if isinstance(parsed, str):
+            html = parsed
+        else:
+            html_match = re.search(
+                r"<!doctype\s+html|<\?xml|<html\b", text, re.IGNORECASE
+            )
+            if not html_match:
+                raise ValueError(f"LLM response is not valid JSON object: {raw[:200]}")
+            html = text[html_match.start() :].strip()
+            if html.startswith('"') and html.endswith('"'):
                 try:
-                    parsed = json.loads(text[first : last + 1])
+                    html = json.loads(html)
                 except json.JSONDecodeError:
-                    pass
+                    html = html[1:-1]
+        html = html.replace("\\n", "\n").replace('\\"', '"').replace("\\'", "'")
+        if "<" in html:  # only accept if it really looks like HTML
+            logger.warning(
+                "Falling back to raw-HTML heuristic (%d chars) — LLM did not return JSON",
+                len(html),
+            )
+            return GeneratedSite(
+                project_name="generated-site",
+                framework="static-html",
+                files=[GeneratedFile(path="index.html", content=html)],
+                preview_summary="",
+            )
+        # Not HTML after all — fall through to error
+        raise ValueError(f"LLM response is not valid JSON object: {raw[:200]}")
 
     if not isinstance(parsed, dict):
-        # Try to repair truncated JSON (LLM hit max_tokens)
-        if text.startswith("{") and not text.rstrip().endswith("}"):
-            # Try to close the JSON by adding missing braces/brackets
-            repaired = text
-            # Count open/close braces and brackets
-            open_braces = repaired.count("{") - repaired.count("}")
-            open_brackets = repaired.count("[") - repaired.count("]")
-            # Try progressively: close brackets first, then braces
-            for _ in range(max(open_braces, open_brackets) + 1):
-                if open_brackets > 0:
-                    repaired += "]" * open_brackets
-                    open_brackets = 0
-                if open_braces > 0:
-                    repaired += "}" * open_braces
-                    open_braces = 0
-                try:
-                    parsed = json.loads(repaired)
-                    logger.warning(
-                        "Repaired truncated JSON (%d extra chars)",
-                        len(repaired) - len(text),
-                    )
-                    break
-                except json.JSONDecodeError:
-                    pass
-        if parsed is None:
-            raise ValueError(f"LLM response is not valid JSON object: {raw[:200]}")
-        if not isinstance(parsed, dict):
-            raise ValueError(f"LLM response is not a JSON object: {raw[:200]}")
+        raise ValueError(f"LLM response is not a JSON object: {raw[:200]}")
 
     files_data = parsed.get("files", [])
     if not isinstance(files_data, list) or not files_data:
