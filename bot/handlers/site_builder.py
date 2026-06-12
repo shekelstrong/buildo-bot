@@ -32,7 +32,7 @@ from aiogram.types import (
 )
 from typing import cast
 
-from bot.services import database, preview, supabase
+from bot.services import database, github_export, preview, supabase
 from bot.services.agent import apply_edit
 from bot.services.scenes import get_scene
 from bot.services.site_generator import generate_site
@@ -58,10 +58,13 @@ CB_MENU = "sb:menu"
 CB_VERSIONS = "sb:versions"
 CB_RETRY = "sb:retry"
 CB_ROLLBACK_PREFIX = "sb:rb:"
+CB_DOWNLOAD = "sb:dl"
+CB_GITHUB = "sb:gh"
+CB_PAGES = "sb:pg"
 
 
 def _preview_keyboard() -> InlineKeyboardMarkup:
-    """Inline buttons for site-preview state."""
+    """Inline buttons for site-preview state — exposes deploy + download."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -69,10 +72,17 @@ def _preview_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="✅ Готово", callback_data=CB_DONE),
             ],
             [
-                InlineKeyboardButton(text="🕒 Версии", callback_data=CB_VERSIONS),
-                InlineKeyboardButton(text="🗑 Удалить", callback_data=CB_DELETE),
+                InlineKeyboardButton(text="🐙 GitHub", callback_data=CB_GITHUB),
+                InlineKeyboardButton(text="🌐 Pages", callback_data=CB_PAGES),
             ],
-            [InlineKeyboardButton(text="📋 В меню", callback_data=CB_MENU)],
+            [
+                InlineKeyboardButton(text="📦 Скачать код", callback_data=CB_DOWNLOAD),
+                InlineKeyboardButton(text="🕒 Версии", callback_data=CB_VERSIONS),
+            ],
+            [
+                InlineKeyboardButton(text="🗑 Удалить", callback_data=CB_DELETE),
+                InlineKeyboardButton(text="📋 В меню", callback_data=CB_MENU),
+            ],
         ]
     )
 
@@ -144,7 +154,7 @@ async def cmd_site(message: Message, state: FSMContext) -> None:
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
     """Cancel current flow."""
     await state.clear()
-    await message.answer("✦ Отменил. /site — начать заново.")
+    await message.answer("✦ Отменил. Жми кнопки в меню.")
 
 
 @router.callback_query(F.data == CB_MENU)
@@ -197,9 +207,21 @@ async def cb_done(callback: CallbackQuery, state: FSMContext) -> None:
                 pass
             await msg.answer(
                 "✦ <b>Готово!</b>\n\n"
-                f"Сайт опубликован: {data.get('preview_url', '—')}\n\n"
-                "/site — создать ещё\n"
-                "/sites — мои сайты"
+                f"Сайт опубликован: {data.get('preview_url', '—')}",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="📦 Скачать код", callback_data="site:download"
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                text="📋 В меню", callback_data="menu:home"
+                            )
+                        ],
+                    ]
+                ),
             )
         except Exception:  # noqa: BLE001
             pass
@@ -234,7 +256,16 @@ async def cb_delete(callback: CallbackQuery, state: FSMContext) -> None:
     if callback.message:
         try:
             await cast(Message, callback.message).edit_text(
-                "🗑 <b>Удалено.</b>\n\n/site — создать новый\n/sites — мои сайты"
+                "🗑 <b>Удалено.</b>",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="📋 В меню", callback_data="menu:home"
+                            )
+                        ]
+                    ]
+                ),
             )
         except Exception:  # noqa: BLE001
             pass
@@ -352,8 +383,17 @@ async def cmd_done(message: Message, state: FSMContext) -> None:
             logger.exception("publish failed")
     await state.clear()
     await message.answer(
-        f"✦ <b>Готово!</b>\n\nСайт опубликован: {data.get('preview_url', '—')}\n\n"
-        "/site — создать ещё\n/sites — мои сайты"
+        f"✦ <b>Готово!</b>\n\nСайт опубликован: {data.get('preview_url', '—')}",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="📦 Скачать код", callback_data="site:download"
+                    )
+                ],
+                [InlineKeyboardButton(text="📋 В меню", callback_data="menu:home")],
+            ]
+        ),
     )
 
 
@@ -661,7 +701,7 @@ async def cmd_sites(message: Message) -> None:
                 lines.append(f"• <b>{name}</b> · {status} · {ts}\n  🔗 {url}")
             else:
                 lines.append(f"• <b>{name}</b> · {status} · {ts}")
-        lines.append("\n/site — создать ещё")
+        lines.append("\n")
         await message.answer(
             "\n".join(lines),
             reply_markup=InlineKeyboardMarkup(
@@ -673,7 +713,7 @@ async def cmd_sites(message: Message) -> None:
                         InlineKeyboardButton(
                             text="🔄 Обновить", callback_data="menu:sites"
                         ),
-                    ]
+                    ],
                 ]
             ),
         )
@@ -692,3 +732,165 @@ async def cmd_static_info(message: Message) -> None:
         "<code>http://108.165.164.85:9090/sites-static/&lt;tg_id&gt;/&lt;site_id&gt;/</code>\n\n"
         "URL приходит в сообщении после генерации."
     )
+
+
+# ===================================================================
+# Download / GitHub / Pages callbacks
+# ===================================================================
+
+
+async def _zip_files_for_download(
+    tg_user_id: int, site_id: str, files: list[dict[str, str]]
+) -> bytes:
+    """Build a zip archive in memory of all generated files."""
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in files:
+            zf.writestr(f["path"], f["content"])
+        # Add README with usage info
+        readme = (
+            f"# Buildo site {site_id}\n\n"
+            f"Generated by Buildo bot for tg_user_id={tg_user_id}.\n\n"
+            f"## How to use\n\n"
+            f"1. Extract this zip\n"
+            f"2. Open `index.html` in a browser — done!\n"
+            f"3. To deploy:\n"
+            f"   - GitHub Pages: push to a repo, enable Pages, done\n"
+            f"   - Vercel/Netlify: drag & drop the folder\n"
+            f"   - Layero: `npx layero deploy --name {site_id[:8]}`\n\n"
+            f"## Files\n\n"
+        )
+        for f in files:
+            readme += f"- `{f['path']}` ({len(f['content'])} bytes)\n"
+        zf.writestr("README.md", readme)
+    return buf.getvalue()
+
+
+@router.callback_query(F.data == CB_DOWNLOAD)
+async def cb_download(callback: CallbackQuery, state: FSMContext) -> None:
+    """Download the current site as a zip archive."""
+    if callback.message is None:
+        await callback.answer()
+        return
+    msg = cast(Message, callback.message)
+    data = await state.get_data()
+    files = data.get("current_files")
+    site_id = data.get("site_id")
+    tg_id = callback.from_user.id if callback.from_user else 0
+    if not files or not site_id:
+        await callback.answer("Нет активного сайта", show_alert=True)
+        return
+
+    await callback.answer("Готовлю архив...")
+    try:
+        zip_bytes = await _zip_files_for_download(tg_id, site_id, files)
+        await msg.answer_document(
+            document=BufferedInputFile(zip_bytes, filename=f"buildo-{site_id[:8]}.zip"),
+            caption=(
+                f"📦 <b>Код сайта</b>\n\n"
+                f"Файлов: {len(files)}\n"
+                f"Размер архива: {len(zip_bytes) // 1024}KB\n\n"
+                f"Распакуй и открой <code>index.html</code> в браузере."
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("cb_download failed")
+        await msg.answer(f"✗ Ошибка: <code>{exc}</code>")
+
+
+@router.callback_query(F.data == CB_GITHUB)
+async def cb_github(callback: CallbackQuery, state: FSMContext) -> None:
+    """Push current site to shekelstrong/buildo-sites on GitHub."""
+    if callback.message is None:
+        await callback.answer()
+        return
+    msg = cast(Message, callback.message)
+    data = await state.get_data()
+    files = data.get("current_files")
+    site_id = data.get("site_id")
+    tg_id = callback.from_user.id if callback.from_user else 0
+    project_name = data.get("project_name", site_id or "buildo-site")
+    if not files or not site_id:
+        await callback.answer("Нет активного сайта", show_alert=True)
+        return
+
+    await callback.answer("Пушу в GitHub...")
+    try:
+        result = await github_export.push_files_to_repo(
+            tg_user_id=tg_id,
+            site_id=site_id,
+            files=files,
+            commit_message=f"buildo: {project_name} ({site_id[:8]})",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("github push failed")
+        await msg.answer(f"✗ Ошибка GitHub: <code>{exc}</code>")
+        return
+
+    if not result["success"]:
+        await msg.answer(
+            f"✗ <b>GitHub push не удался</b>\n\n"
+            f"<code>{result.get('error', '')[:300]}</code>\n\n"
+            f"Попробуй позже или скачай код кнопкой «📦 Скачать код»."
+        )
+        return
+
+    short_sha = result.get("commit_sha", "")[:7]
+    await msg.answer(
+        f"✦ <b>Залито в GitHub!</b>\n\n"
+        f"Файлов: <b>{result['files_pushed']}</b>\n"
+        f"Commit: <code>{short_sha}</code>\n"
+        f"🔗 <a href=\"{result['repo_url']}\">Открыть в GitHub</a>\n\n"
+        f"Сайт приватный (только в нашей организации shekelstrong).\n"
+        f"Чтобы расшарить — нажми «🌐 Pages» для публичного URL.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🌐 Pages", callback_data=CB_PAGES)],
+                [InlineKeyboardButton(text="📋 В меню", callback_data=CB_MENU)],
+            ]
+        ),
+    )
+
+
+@router.callback_query(F.data == CB_PAGES)
+async def cb_pages(callback: CallbackQuery, state: FSMContext) -> None:
+    """Get a public GitHub Pages URL for the current site."""
+    if callback.message is None:
+        await callback.answer()
+        return
+    msg = cast(Message, callback.message)
+    data = await state.get_data()
+    site_id = data.get("site_id")
+    tg_id = callback.from_user.id if callback.from_user else 0
+    if not site_id:
+        await callback.answer("Сначала сохрани сайт в GitHub", show_alert=True)
+        return
+
+    await callback.answer()
+    try:
+        result = await github_export.create_github_pages_deploy(tg_id, site_id)
+        if not result.get("success"):
+            await msg.answer(
+                f"✗ Pages недоступны: <code>{result.get('error', '')}</code>"
+            )
+            return
+        url = result["pages_url"]
+        await msg.answer(
+            f"🌐 <b>Публичный URL</b>\n\n"
+            f"<code>{url}</code>\n\n"
+            f"⏳ GitHub опубликует через ~30 секунд (Actions → pages build).\n"
+            f"Потом страница будет доступна всем.\n\n"
+            f"💡 Эту ссылку можно расшарить — она публичная.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🔗 Открыть", url=url)],
+                    [InlineKeyboardButton(text="📋 В меню", callback_data=CB_MENU)],
+                ]
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("cb_pages failed")
+        await msg.answer(f"✗ Ошибка: <code>{exc}</code>")

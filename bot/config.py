@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     # ===== Layero (hosting) =====
     layero_api_token: str = "dummy_layero_token"
 
+    # ===== GitHub (export sites to shared repo for Pages hosting) =====
+    github_token: str = "dummy_github_token"
+
     # ===== reg.ru (domains) =====
     regru_api_login: str = ""
     regru_api_password: str = ""

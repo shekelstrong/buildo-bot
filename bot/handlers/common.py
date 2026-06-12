@@ -106,11 +106,10 @@ async def cmd_start(message: Message, command) -> None:  # type: ignore[no-untyp
         "Опиши словами, что нужно — я сгенерирую код и задеплою за тебя.\n\n"
         "<b>Что умею:</b>\n"
         "• ✦ Создать сайт по твоему описанию\n"
-        "• ✦ Задеплоить его автоматически (Layero / GitHub)\n"
+        "• ✦ Задеплоить автоматически (GitHub / Layero)\n"
         "• ✦ Внести правки через чат (диалог-агент)\n"
         "• ✦ Вести SEO-блог с AI\n"
-        "• ✦ Привести друзей и заработать\n\n"
-        "Или используй кнопки ниже:",
+        "• ✦ Привести друзей и заработать",
         reply_markup=_main_keyboard(),
     )
 
@@ -122,23 +121,15 @@ async def cmd_start(message: Message, command) -> None:  # type: ignore[no-untyp
 async def cmd_help(message: Message) -> None:
     await message.answer(
         "✦ <b>Справка Buildo</b>\n\n"
-        "<b>Основные команды:</b>\n"
-        "/start — главное меню\n"
-        "/site — создать новый сайт\n"
-        "/sites — список моих сайтов\n"
-        "/referral — реферальная программа\n"
-        "/articles — SEO-статьи и блог (фаза 1.5)\n"
-        "/help — эта справка\n"
-        "/admin — управление (для владельца)\n\n"
         "<b>Как создать сайт:</b>\n"
-        "1. Жми «✦ Создать сайт» или пиши /site\n"
+        "1. Жми «✦ Создать сайт» в меню\n"
         "2. Опиши словами, что нужно\n"
         "3. Я сгенерирую код и покажу превью\n"
         "4. Скажи «задеплой» или жми «✅ Готово»\n"
-        "5. Опционально подключи свой домен (фаза 1.5)\n\n"
+        "5. Скачай код или задеплой на GitHub/Layero\n\n"
         "<b>Хостинг:</b>\n"
-        "• Layero (по умолчанию, бесплатно, РФ)\n"
-        "• GitHub Pages (бэкап + история)\n\n"
+        "• GitHub Pages (бесплатно, наша организация)\n"
+        "• Layero (бесплатно, РФ, HTTPS из коробки)\n\n"
         "Вопросы — пиши прямо сюда в чат.",
         reply_markup=_main_keyboard(),
     )
@@ -408,13 +399,12 @@ async def cb_menu_help(callback: CallbackQuery) -> None:
 
 @router.message()
 async def fallback(message: Message) -> None:
-    """Catch-all for unrecognized messages — guide user to commands."""
+    """Catch-all for unrecognized messages — guide user to buttons."""
     if message.text and message.text.startswith("/"):
         return
     await message.answer(
         "✦ Это пока вне моего скоупа.\n\n"
         "Попробуй:\n"
-        "• <b>/site</b> — создать сайт\n"
-        "• Опиши задачу словами: <i>«сделай лендинг для кофейни»</i>\n"
-        "• Или используй кнопки из /start"
+        "• Жми «✦ Создать сайт» в меню\n"
+        "• Опиши задачу словами: <i>«сделай лендинг для кофейни»</i>"
     )

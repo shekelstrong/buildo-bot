@@ -22,6 +22,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 
+from bot.services.freesets import get_libraries_prompt_section
 from bot.services.llm import chat
 
 logger = logging.getLogger(__name__)
@@ -60,21 +61,25 @@ DESIGN PRINCIPLES (taste-skill v2):
 - Add subtle scroll-reveal via IntersectionObserver (inline JS, no libraries).
 - Make CTA buttons visually obvious (high contrast, hover state, scale on hover).
 
-HTML STRUCTURE (single index.html):
-- <!doctype html> + <html lang="ru"> (or "en" if user wrote in English)
-- <head>: meta charset, viewport, title, <style> block, Google Fonts import
+HTML STRUCTURE:
+- For SIMPLE landing pages (one section, 3-5 components): SINGLE file — output ONE index.html with inline <style> and <script>.
+- For SERIOUS projects (multi-section landing with interactivity, animations, multiple components, dark mode, forms with validation, etc.): use MULTI-FILE structure:
+  - index.html — semantic markup with <link rel="stylesheet" href="styles.css"> and <script src="app.js"></script>
+  - styles.css — all CSS extracted
+  - app.js — all JS extracted (use vanilla JS — no jQuery, no frameworks)
+  - Optional: assets/logo.svg for logos, assets/hero.jpg for images (just placeholder paths — we don't generate images, we just structure the code)
+- Default: choose SINGLE-file for simple requests, MULTI-file for complex ones. Use your judgment.
+- <head>: meta charset, viewport, title, <style> block or <link> to CSS, Google Fonts import
 - <body>: header/nav (sticky), hero, features (asymmetric, not 3-equal-cards), proof/social-proof, CTA, footer
-- One <script> block at bottom for: smooth scroll, IntersectionObserver reveal, any interactivity
-- Semantic HTML5: <header>, <main>, <section>, <footer>
 - Add basic SEO: <title>, <meta name="description">, og:title, og:description
 
 QUALITY BAR:
 - Code must RUN. Just open index.html in a browser — that's it.
 - No placeholder comments. No TODO. No "..." truncations.
 - Single-page only. Multi-page sites are out of scope for one call.
-- Total file size: aim for 20-40KB of HTML. Less is fine. Be CONCISE.
+- File size: 20-40KB total (across all files). Less is fine. Be CONCISE.
 - Use 3-5 sections max. Short copy. Tight CSS. No bloat.
-"""
+""" + get_libraries_prompt_section()
 
 
 @dataclass
@@ -176,17 +181,32 @@ def _parse_response(raw: str) -> GeneratedSite:
     if not files:
         raise ValueError("No valid file entries in LLM response")
 
-    # Enforce: must be static-html. Convert any non-HTML files to inline-into-index.
+    # Whitelist allowed paths (security + cleanliness)
+    allowed_exts = (".html", ".css", ".js", ".json", ".svg", ".txt", ".xml")
+    files = [f for f in files if f.path.lower().endswith(allowed_exts)]
+    if not files:
+        raise ValueError("No valid file types (allowed: html/css/js/json/svg/txt/xml)")
+
+    # Sanitize paths: keep relative, no ../
+    sanitized: list[GeneratedFile] = []
+    for f in files:
+        clean_path = f.path.lstrip("/")
+        if ".." in clean_path.split("/"):
+            continue
+        sanitized.append(f)
+    files = sanitized
+    if not files:
+        raise ValueError("No valid paths after sanitization")
+
     has_index = any(f.path == "index.html" for f in files)
     if not has_index:
-        # Create a minimal index.html that includes all files
+        # If LLM gave us separate css/js but no index.html, build one
         css = "\n".join(f.content for f in files if f.path.endswith(".css"))
         js = "\n".join(f.content for f in files if f.path.endswith(".js"))
         html_body = next(
             (f.content for f in files if f.path.endswith(".html")),
             "<h1>Buildo site</h1>",
         )
-        # If html_body is full document, strip doctype/head
         if "<body" in html_body:
             import re as _re
 
@@ -205,6 +225,29 @@ def _parse_response(raw: str) -> GeneratedSite:
 <body>{html_body}<script>{js}</script></body>
 </html>"""
         files = [GeneratedFile(path="index.html", content=merged)]
+    else:
+        # Multi-file: ensure index.html has <link> tags for separate CSS files
+        # and <script src> for separate JS files (rather than inline).
+        idx_idx = next(i for i, f in enumerate(files) if f.path == "index.html")
+        idx_content = files[idx_idx].content
+        external_css = [
+            f for f in files if f.path.endswith(".css") and f.path != "index.html"
+        ]
+        external_js = [
+            f for f in files if f.path.endswith(".js") and f.path != "index.html"
+        ]
+        # If external files exist and not inlined, add <link>/<script src>
+        if external_css and "</head>" in idx_content:
+            links = "\n".join(
+                f'  <link rel="stylesheet" href="{f.path}">' for f in external_css
+            )
+            idx_content = idx_content.replace("</head>", f"{links}\n</head>", 1)
+        if external_js and "</body>" in idx_content:
+            scripts = "\n".join(
+                f'  <script src="{f.path}"></script>' for f in external_js
+            )
+            idx_content = idx_content.replace("</body>", f"{scripts}\n</body>", 1)
+        files[idx_idx] = GeneratedFile(path="index.html", content=idx_content)
 
     return GeneratedSite(
         project_name=str(parsed.get("project_name", "buildo-site")),

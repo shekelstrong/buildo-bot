@@ -435,15 +435,36 @@ SCENES = {
 
 
 def get_scene(name: str) -> bytes:
-    """Return PNG bytes for a named scene. Defaults to 'welcome'."""
+    """Return PNG bytes for a named scene. Defaults to 'welcome'.
+
+    Generates at 800x600 (Telegram-friendly size, < 30KB) and converts
+    to RGB-mode PNG. Smaller images = better Telegram compatibility.
+    """
     fn = SCENES.get(name, welcome)
     svg_bytes = fn()
     try:
-        import cairosvg
+        import io
 
-        result = cairosvg.svg2png(
-            bytestring=svg_bytes, output_width=1024, output_height=768
+        import cairosvg
+        from PIL import Image
+
+        # Generate at moderate size — 800x600 is well-supported by Telegram
+        png_raw_raw: object = cairosvg.svg2png(
+            bytestring=svg_bytes, output_width=800, output_height=600
         )
-        return cast(bytes, result)
+        png_raw = cast(bytes, png_raw_raw)
+        # Open with PIL, convert to RGB (Telegram sometimes rejects RGBA),
+        # and save as optimized PNG
+        img = Image.open(io.BytesIO(png_raw))
+        if img.mode == "RGBA":
+            # Flatten on midnight background (matches brand)
+            bg = Image.new("RGB", img.size, (10, 22, 40))  # #0A1628
+            bg.paste(img, mask=img.split()[3])
+            img = bg
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+        out = io.BytesIO()
+        img.save(out, format="PNG", optimize=True)
+        return out.getvalue()
     except Exception:  # noqa: BLE001
         return svg_bytes
