@@ -348,9 +348,16 @@ async def receive_prompt(message: Message, state: FSMContext) -> None:
         [InlineKeyboardButton(text="📋 В меню", callback_data=CB_MENU)],
     ]
 
+    # Делаем превью-ссылку короткой и кликабельной: отрезаем хост/порт
+    short_preview = preview_url
+    if "://" in short_preview:
+        short_preview = short_preview.split("://", 1)[1]
+    if short_preview.startswith("108.165.164.85:9090/"):
+        short_preview = short_preview.replace("108.165.164.85:9090/", "buildo/", 1)
+
     await progress.finish(
         f"✦ <b>Готово!</b>\n\n"
-        f"🌐 Превью: <code>{preview_url}</code>\n\n"
+        f'🌐 <b>Превью</b>: <a href="{preview_url}">{short_preview}</a>\n\n'
         f"{quality_text}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
     )
