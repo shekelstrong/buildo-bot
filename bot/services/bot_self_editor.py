@@ -152,7 +152,9 @@ async def propose_edit(
         {"role": "system", "content": EDIT_AGENT_SYSTEM_PROMPT},
         {"role": "user", "content": user_msg},
     ]
-    logger.info("edit.propose request_len=%d files=%d", len(admin_request), len(context_files))
+    logger.info(
+        "edit.propose request_len=%d files=%d", len(admin_request), len(context_files)
+    )
 
     raw = await chat(messages, max_tokens=16000, temperature=0.2)
 
@@ -293,9 +295,9 @@ async def apply_and_commit(
         )
         if rc != 0 and "nothing to commit" not in out + err:
             return rc, out, err, -1, "", ""
-        # get sha
-        rc2, out2, err2 = _git(["rev-parse", "HEAD"])
-        sha = out2.strip() if rc2 == 0 else ""
+        # get sha (kept for future logging)
+        _rc2, out2, _err2 = _git(["rev-parse", "HEAD"])
+        _ = out2.strip()
         # git push
         rc3, out3, err3 = _git(["push", "origin", "main"], timeout=60)
         return 0, "", "", rc3, out3, err3

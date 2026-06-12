@@ -29,6 +29,7 @@ from redis.asyncio import Redis
 from bot.api.app import create_api_app
 from bot.config import get_settings
 from bot.handlers import admin as admin_handlers
+from bot.handlers import articles as articles_handlers
 from bot.handlers import common as common_handlers
 from bot.handlers import referral as referral_handlers
 from bot.handlers import site_builder as site_handlers
@@ -65,6 +66,7 @@ def build_app() -> tuple[Bot, Dispatcher]:
     dp.include_router(admin_handlers.router)
     dp.include_router(site_handlers.router)
     dp.include_router(referral_handlers.router)
+    dp.include_router(articles_handlers.router)
     dp.include_router(common_handlers.router)
 
     return bot, dp
