@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 import random
-from typing import Sequence, cast
+from typing import Optional, Sequence, cast
 
 # Buildo brand palette (from 12-brand-book.md)
 COLORS = {
@@ -434,11 +434,15 @@ SCENES = {
 }
 
 
-def get_scene(name: str) -> bytes:
+def get_scene(name: str) -> Optional[bytes]:
     """Return PNG bytes for a named scene. Defaults to 'welcome'.
 
     Generates at 800x600 (Telegram-friendly size, < 30KB) and converts
     to RGB-mode PNG. Smaller images = better Telegram compatibility.
+
+    Returns None on render failure (e.g. libcairo missing). Caller is
+    expected to skip the photo if None — Telegram rejects raw SVG bytes
+    with IMAGE_PROCESS_FAILED.
     """
     fn = SCENES.get(name, welcome)
     svg_bytes = fn()
@@ -467,4 +471,6 @@ def get_scene(name: str) -> bytes:
         img.save(out, format="PNG", optimize=True)
         return out.getvalue()
     except Exception:  # noqa: BLE001
-        return svg_bytes
+        # libcairo missing, corrupt SVG, OOM, etc. Returning raw SVG
+        # would crash Telegram's image pipeline. Signal failure instead.
+        return None

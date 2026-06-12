@@ -5,6 +5,16 @@
     await progress.start("🔍 Анализирую...")
     await progress.update("🎨 Подбираю стиль...")
     await progress.finish("✦ Готово! ...")
+
+Behaviour:
+- start() — отправляет send_message с `parse_mode="HTML"`.
+- update() — пытается edit_message_text (HTML). Если Telegram отвергает
+  HTML (например, "Unsupported start tag" — бывает когда enriched prompt
+  содержит LLM-разметку <section>), пробует edit БЕЗ parse_mode. Если и
+  это падает, отправляет новое сообщение через send_message.
+- finish() / fail() — то же, что update() но с остановкой typing.
+- Любые ошибки логируются и **никогда не теряются** — пользователь
+  гарантированно видит финал.
 """
 
 from __future__ import annotations
@@ -36,24 +46,60 @@ class ProgressMessage:
     ) -> None:
         """Отправить начальное сообщение и запустить индикатор 'печатает...'."""
         self._current_text = text
+        msg = await self._send_safe(text, reply_markup=reply_markup)
+        if msg is not None:
+            self._message = msg
+            self._start_typing_loop()
+            return
+        # Если даже start() упал — пробуем plain text без HTML
         try:
             self._message = await self.bot.send_message(
-                chat_id=self.chat_id,
-                text=text,
-                reply_markup=reply_markup,
+                chat_id=self.chat_id, text=text, reply_markup=reply_markup
             )
-        except (TelegramAPIError, TelegramRetryAfter) as exc:
-            logger.warning("ProgressMessage.start failed: %s", exc)
-            return
-        self._start_typing_loop()
+            self._start_typing_loop()
+        except TelegramAPIError as exc:
+            logger.warning("ProgressMessage.start plain-text fallback failed: %s", exc)
 
     async def update(
         self, text: str, reply_markup: InlineKeyboardMarkup | None = None
     ) -> None:
-        """Обновить текст того же сообщения. Кнопки можно передать для финала."""
+        """Обновить текст того же сообщения.
+
+        Стратегия fallback (по убыванию):
+        1. edit_message_text с parse_mode="HTML"
+        2. edit_message_text БЕЗ parse_mode (plain)
+        3. send_message БЕЗ parse_mode (новое сообщение)
+        """
         if self._message is None:
+            # Если start() не сработал — отправляем новое сообщение
+            await self._send_new_safe(text, reply_markup=reply_markup)
             return
+
         self._current_text = text
+
+        # 1) HTML edit
+        try:
+            await self.bot.edit_message_text(
+                text=text,
+                chat_id=self.chat_id,
+                message_id=self._message.message_id,
+                reply_markup=reply_markup,
+                parse_mode="HTML",
+            )
+            return
+        except TelegramRetryAfter as exc:
+            logger.warning("TelegramRetryAfter in update: %s, waiting", exc.retry_after)
+            await asyncio.sleep(exc.retry_after)
+            await self.update(text, reply_markup)
+            return
+        except TelegramAPIError as exc:
+            err_text = str(exc).lower()
+            if "not modified" in err_text:
+                # OK — текст уже такой же
+                return
+            logger.warning("ProgressMessage.update HTML failed: %s", exc)
+
+        # 2) Plain edit (no parse_mode)
         try:
             await self.bot.edit_message_text(
                 text=text,
@@ -61,15 +107,15 @@ class ProgressMessage:
                 message_id=self._message.message_id,
                 reply_markup=reply_markup,
             )
-        except TelegramRetryAfter as exc:
-            # Telegram требует подождать N секунд
-            logger.warning("TelegramRetryAfter: %s, waiting", exc.retry_after)
-            await asyncio.sleep(exc.retry_after)
-            await self.update(text, reply_markup)
+            return
         except TelegramAPIError as exc:
-            # "message is not modified" — игнорируем
-            if "not modified" not in str(exc).lower():
-                logger.warning("ProgressMessage.update failed: %s", exc)
+            err_text = str(exc).lower()
+            if "not modified" in err_text:
+                return
+            logger.warning("ProgressMessage.update plain edit failed: %s", exc)
+
+        # 3) New message (последний шанс — юзер должен УВИДЕТЬ текст)
+        await self._send_new_safe(text, reply_markup=reply_markup)
 
     async def finish(
         self, text: str, reply_markup: InlineKeyboardMarkup | None = None
@@ -82,6 +128,35 @@ class ProgressMessage:
         """Сообщение об ошибке."""
         await self._stop_typing_loop()
         await self.update(f"⚠️ {text}")
+
+    async def _send_safe(
+        self, text: str, reply_markup: InlineKeyboardMarkup | None
+    ) -> Message | None:
+        """send_message с HTML, fallback на plain text. Возвращает Message или None."""
+        try:
+            return await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode="HTML",
+            )
+        except TelegramAPIError as exc:
+            logger.warning("send_message HTML failed: %s — trying plain", exc)
+        try:
+            return await self.bot.send_message(
+                chat_id=self.chat_id, text=text, reply_markup=reply_markup
+            )
+        except TelegramAPIError as exc:
+            logger.warning("send_message plain failed: %s", exc)
+            return None
+
+    async def _send_new_safe(
+        self, text: str, reply_markup: InlineKeyboardMarkup | None
+    ) -> None:
+        """send_message как новое сообщение (когда edit не сработал)."""
+        msg = await self._send_safe(text, reply_markup=reply_markup)
+        if msg is not None:
+            self._message = msg  # теперь это наше текущее сообщение
 
     def _start_typing_loop(self) -> None:
         """Запустить фоновую задачу которая каждые 4с шлёт 'typing'."""

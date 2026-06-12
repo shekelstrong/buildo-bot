@@ -52,15 +52,25 @@ def _main_keyboard() -> InlineKeyboardMarkup:
 
 
 async def _send_scene(message: Message, scene_name: str) -> None:
-    """Send a scene PNG as a photo (Telegram renders inline)."""
+    """Send a scene PNG as a photo (Telegram renders inline).
+
+    Falls back to plain text (no photo) on any error so the welcome
+    message is still delivered.
+    """
     try:
         png = get_scene(scene_name)
-        await message.answer_photo(
-            photo=BufferedInputFile(png, filename=f"{scene_name}.png"),
-            caption="",
-        )
+        if png:
+            await message.answer_photo(
+                photo=BufferedInputFile(png, filename=f"{scene_name}.png"),
+                caption="",
+            )
+            return
     except Exception:  # noqa: BLE001
         logger.exception("scene %s send failed", scene_name)
+    # Fallback: ничего не шлём (основное приветствие идёт из cmd_start
+    # отдельным сообщением, чтобы кнопки инлайн рендерились отдельно).
+    # Если answer_photo упал, aiogram отвечает юзеру обычным сообщением —
+    # текст и кнопки всё равно дойдут, просто без preview-картинки.
 
 
 # ============== Global /start reset (must come BEFORE any state-bound handlers) ==============
