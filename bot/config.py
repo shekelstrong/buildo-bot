@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     # ===== GitHub (export sites to shared repo for Pages hosting) =====
     github_token: str = "dummy_github_token"
 
+    # GitHub OAuth (Device Flow) - https://github.com/settings/developers
+    # Buildo Bot OAuth App: Client ID = Ov23liOTYx0Y4LeTu1gW
+    # Device Flow does NOT need a client secret (public client).
+    github_oauth_client_id: str = "Ov23liOTYx0Y4LeTu1gW"
+    github_oauth_scopes: str = "repo"
+
     # ===== Encryption (Fernet key for user GitHub tokens at rest) =====
     encryption_key: str = ""
 

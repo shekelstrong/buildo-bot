@@ -903,7 +903,11 @@ async def cb_download(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == CB_GITHUB)
 async def cb_github(callback: CallbackQuery, state: FSMContext) -> None:
-    """Push current site to shekelstrong/buildo-sites on GitHub."""
+    """Push current site to GitHub (user's own repo if connected, else fallback).
+
+    If user not connected to GitHub — show CTA to /github connect instead
+    of silently pushing to private shekelstrong/buildo-sites (which 404s).
+    """
     if callback.message is None:
         await callback.answer()
         return
@@ -917,16 +921,54 @@ async def cb_github(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Нет активного сайта", show_alert=True)
         return
 
-    await callback.answer("Пушу в GitHub...")
+    # Проверяем, подключён ли юзер к GitHub
+    gh_info = await database.get_user_github_info(tg_id)
+    user_connected = gh_info and gh_info.get("connected")
+
+    if not user_connected:
+        # CTA: подключи GitHub — тогда сайт улетит в твой репо
+        from bot.handlers.auth_github import _github_disconnected_kb
+
+        await callback.answer()
+        await msg.answer(
+            "🐙 <b>GitHub не подключён</b>\n\n"
+            "Сейчас бот зальёт сайт в <b>общий</b> приватный репозиторий "
+            "shekelstrong/buildo-sites — оттуда его не расшаришь.\n\n"
+            "Лучше подключи свой GitHub — это 15 секунд:\n"
+            "• Кнопка ниже → <b>⚡ OAuth (рекомендую)</b>\n"
+            "• Или отправь <code>/github connect</code>\n\n"
+            "Тогда сайт зальётся в <code>твой_юзер/buildo-sites</code> "
+            "и ты сможешь открыть его через GitHub Pages.",
+            reply_markup=_github_disconnected_kb(),
+        )
+        return
+
+    # User connected — push to user's repo
+    await callback.answer("Пушу в твой GitHub...")
+    username = gh_info["github_username"]
     try:
-        result = await github_export.push_files_to_repo(
+        user_token = await database.get_user_github_token(tg_id)
+        if not user_token:
+            await msg.answer(
+                "⚠️ Token не найден. Попробуй /github disconnect → /github connect."
+            )
+            return
+        token_enc, _ = user_token
+        # Decrypt
+        from bot.services.github_export import decrypt_token
+
+        plain_token = decrypt_token(token_enc)
+
+        result = await github_export.push_files_to_user_repo(
+            github_token=plain_token,
+            github_username=username,
             tg_user_id=tg_id,
             site_id=site_id,
             files=files,
             commit_message=f"buildo: {project_name} ({site_id[:8]})",
         )
     except Exception as exc:  # noqa: BLE001
-        logger.exception("github push failed")
+        logger.exception("github push (user repo) failed")
         await msg.answer(f"✗ Ошибка GitHub: <code>{exc}</code>")
         return
 
@@ -934,21 +976,27 @@ async def cb_github(callback: CallbackQuery, state: FSMContext) -> None:
         await msg.answer(
             f"✗ <b>GitHub push не удался</b>\n\n"
             f"<code>{result.get('error', '')[:300]}</code>\n\n"
-            f"Попробуй позже или скачай код кнопкой «📦 Скачать код»."
+            f"Попробуй /github disconnect → /github connect заново."
         )
         return
 
     short_sha = result.get("commit_sha", "")[:7]
+    pages_url = f"https://{username}.github.io/buildo-sites/sites/{tg_id}/{site_id}/"
     await msg.answer(
-        f"✦ <b>Залито в GitHub!</b>\n\n"
+        f"✦ <b>Залито в твой GitHub!</b>\n\n"
+        f"Аккаунт: <b>@{username}</b>\n"
         f"Файлов: <b>{result['files_pushed']}</b>\n"
         f"Commit: <code>{short_sha}</code>\n"
         f"🔗 <a href=\"{result['repo_url']}\">Открыть в GitHub</a>\n\n"
-        f"Сайт приватный (только в нашей организации shekelstrong).\n"
-        f"Чтобы расшарить — нажми «🌐 Pages» для публичного URL.",
+        f"🌐 <b>Чтобы открыть публично</b>:\n"
+        f"1. Зайди в репо <code>{username}/buildo-sites</code>\n"
+        f"2. Settings → Pages → Source: <b>GitHub Actions</b>\n"
+        f"3. Подожди ~30 сек\n\n"
+        f"Готовая ссылка (после публикации):\n"
+        f"<a href=\"{pages_url}\">{pages_url}</a>",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="🌐 Pages", callback_data=CB_PAGES)],
+                [InlineKeyboardButton(text="🌐 Открыть URL", url=pages_url)],
                 [InlineKeyboardButton(text="📋 В меню", callback_data=CB_MENU)],
             ]
         ),

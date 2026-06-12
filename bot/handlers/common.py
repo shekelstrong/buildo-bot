@@ -43,7 +43,10 @@ def _main_keyboard() -> InlineKeyboardMarkup:
                 ),
                 InlineKeyboardButton(text="👥 Рефералы", callback_data="menu:referral"),
             ],
-            [InlineKeyboardButton(text="ℹ️ Помощь", callback_data="menu:help")],
+            [
+                InlineKeyboardButton(text="🐙 GitHub", callback_data="menu:github"),
+                InlineKeyboardButton(text="ℹ️ Помощь", callback_data="menu:help"),
+            ],
         ]
     )
 
@@ -126,9 +129,15 @@ async def cmd_help(message: Message) -> None:
         "2. Опиши словами, что нужно\n"
         "3. Я сгенерирую код и покажу превью\n"
         "4. Скажи «задеплой» или жми «✅ Готово»\n"
-        "5. Скачай код или задеплой на GitHub/Layero\n\n"
+        "5. Скачай код или задеплой в свой GitHub\n\n"
+        "<b>Чтобы сайт открывался по ссылке у друзей:</b>\n"
+        "1. Подключи GitHub (кнопка «🐙 GitHub» в меню)\n"
+        "2. Сгенерируй сайт\n"
+        "3. В превью жми «🐙 Залить в GitHub»\n"
+        "4. Включи Pages в репо (Settings → Pages → GitHub Actions)\n"
+        "5. Готово — ссылка работает для всех\n\n"
         "<b>Хостинг:</b>\n"
-        "• GitHub Pages (бесплатно, наша организация)\n"
+        "• GitHub Pages (бесплатно, твой репо)\n"
         "• Layero (бесплатно, РФ, HTTPS из коробки)\n\n"
         "Вопросы — пиши прямо сюда в чат.",
         reply_markup=_main_keyboard(),
@@ -407,6 +416,22 @@ async def cb_menu_help(callback: CallbackQuery) -> None:
         )
     except Exception:  # noqa: BLE001
         pass
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:github")
+async def cb_menu_github(callback: CallbackQuery, state: FSMContext) -> None:
+    """Inline button 'GitHub' — runs /github logic."""
+    if callback.message is None:
+        await callback.answer()
+        return
+    # Имитируем /github: создаём новое сообщение с тем же текстом
+    from bot.handlers.auth_github import cmd_github
+
+    msg = cast(Message, callback.message)
+    # Подменяем message.text чтобы cmd_github сработал
+    fake = cast(Message, msg.model_copy(update={"text": "/github"}))
+    await cmd_github(fake, state)
     await callback.answer()
 
 

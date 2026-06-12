@@ -131,6 +131,121 @@ async def ban_user(tg_user_id: int) -> bool:
 
 
 # =====================================================================
+# GITHUB OAUTH (Device Flow)
+# =====================================================================
+
+
+async def set_user_github_oauth(
+    tg_user_id: int,
+    token_encrypted: str,
+    username: str,
+) -> bool:
+    """Store GitHub OAuth token (Fernet-encrypted) + username for user.
+
+    Used after Device Flow completes successfully.
+    """
+    pool = await get_pool()
+    if pool is None:
+        return False
+    try:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE users SET
+                        github_token_encrypted = %s,
+                        github_username = %s,
+                        github_connected_at = now(),
+                        updated_at = now()
+                    WHERE tg_user_id = %s
+                    """,
+                    (token_encrypted, username, tg_user_id),
+                )
+                return cur.rowcount > 0
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("set_user_github_oauth failed: %s", exc)
+        return False
+
+
+async def clear_user_github(tg_user_id: int) -> bool:
+    """Disconnect GitHub: wipe encrypted token + username."""
+    pool = await get_pool()
+    if pool is None:
+        return False
+    try:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE users SET
+                        github_token_encrypted = NULL,
+                        github_username = NULL,
+                        github_connected_at = NULL,
+                        updated_at = now()
+                    WHERE tg_user_id = %s
+                    """,
+                    (tg_user_id,),
+                )
+                return cur.rowcount > 0
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("clear_user_github failed: %s", exc)
+        return False
+
+
+async def get_user_github_info(tg_user_id: int) -> dict[str, Any] | None:
+    """Return {connected, username, connected_at} — never the token itself."""
+    pool = await get_pool()
+    if pool is None:
+        return None
+    try:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT
+                        github_token_encrypted IS NOT NULL AS connected,
+                        github_username,
+                        github_connected_at
+                    FROM users WHERE tg_user_id = %s
+                    """,
+                    (tg_user_id,),
+                )
+                return await cur.fetchone()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("get_user_github_info failed: %s", exc)
+        return None
+
+
+async def get_user_github_token(tg_user_id: int) -> tuple[str, str] | None:
+    """Return (token, username) for backend use. Token is Fernet-encrypted.
+
+    Returns None if user not connected.
+    """
+    pool = await get_pool()
+    if pool is None:
+        return None
+    try:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT github_token_encrypted, github_username
+                    FROM users
+                    WHERE tg_user_id = %s
+                      AND github_token_encrypted IS NOT NULL
+                    """,
+                    (tg_user_id,),
+                )
+                row = await cur.fetchone()
+                if not row:
+                    return None
+                return (row["github_token_encrypted"], row["github_username"])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("get_user_github_token failed: %s", exc)
+        return None
+
+
+# =====================================================================
 # SITE OPERATIONS
 # =====================================================================
 
