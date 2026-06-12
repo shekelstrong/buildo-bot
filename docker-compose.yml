@@ -9,6 +9,8 @@ services:
       - .env
     volumes:
       - ./logs:/app/logs
+      # Generated sites — bind-mount so files survive container restarts
+      - ./buildo-sites:/root/buildo-sites
     # Expose health + public API on host port 9090 (8080 is taken by langnexus-bot on this host)
     # All endpoints (health, /api/v1/*) run on single FastAPI app inside container on :8080
     ports:
