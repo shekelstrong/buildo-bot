@@ -186,6 +186,7 @@ async def cb_menu_site(callback: CallbackQuery, state: FSMContext) -> None:
 
     try:
         from bot.services.scenes import get_scene
+
         png = get_scene("generating")
         await msg.answer_photo(
             photo=BufferedInputFile(png, filename="generating.png"),
@@ -206,7 +207,11 @@ async def cb_menu_site(callback: CallbackQuery, state: FSMContext) -> None:
         "• <i>Онлайн-курс по Python для начинающих</i>",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="⏭ Пропустить", callback_data="brief:niche:skip")],
+                [
+                    InlineKeyboardButton(
+                        text="⏭ Пропустить", callback_data="brief:niche:skip"
+                    )
+                ],
                 [InlineKeyboardButton(text="📋 В меню", callback_data="sb:menu")],
             ]
         ),
