@@ -372,7 +372,7 @@ async def cb_github_pat(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-@router.message(GitHubAuthFSM.waiting_for_pat)
+@router.message(GitHubAuthFSM.waiting_for_pat, ~F.text.startswith("/"))
 async def receive_pat(message: Message, state: FSMContext) -> None:
     """Получили PAT — валидируем, encrypt, store."""
     if not message.text or not message.from_user:

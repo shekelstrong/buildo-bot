@@ -207,7 +207,7 @@ async def cb_admin_edit(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer("Опиши правку")
 
 
-@router.message(AdminEditFlow.waiting_for_request)
+@router.message(AdminEditFlow.waiting_for_request, ~F.text.startswith("/"))
 async def receive_edit_request(message: Message, state: FSMContext) -> None:
     """Admin sent a change description — call LLM, show proposal."""
     if message.text is None or not message.text.strip():

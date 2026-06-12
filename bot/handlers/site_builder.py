@@ -597,9 +597,13 @@ async def cmd_done(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(SiteFlow.preview)
+@router.message(SiteFlow.preview, ~F.text.startswith("/"))
 async def receive_first_edit(message: Message, state: FSMContext) -> None:
-    """After preview, user can send an edit instruction (text in dialog)."""
+    """After preview, user can send an edit instruction (text in dialog).
+
+    Commands (starting with /) are NOT processed here — they fall through
+    to common_handlers for /start, /help, /menu etc.
+    """
     if message.text is None or not message.text.strip():
         return
     # Transition to editing state and process
@@ -607,9 +611,13 @@ async def receive_first_edit(message: Message, state: FSMContext) -> None:
     await _apply_user_edit(message, state)
 
 
-@router.message(SiteFlow.editing)
+@router.message(SiteFlow.editing, ~F.text.startswith("/"))
 async def receive_edit(message: Message, state: FSMContext) -> None:
-    """In editing mode: apply user's instruction, re-deploy."""
+    """In editing mode: apply user's instruction, re-deploy.
+
+    Commands (starting with /) are NOT processed here — they fall through
+    to common_handlers for /start, /help, /menu etc.
+    """
     if message.text is None or not message.text.strip():
         return
     await _apply_user_edit(message, state)
