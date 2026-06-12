@@ -101,14 +101,25 @@ def _preview_keyboard() -> InlineKeyboardMarkup:
 
 
 def _editing_keyboard() -> InlineKeyboardMarkup:
-    """Inline buttons for editing state — always shows 'В меню'."""
+    """Inline buttons for editing state — always shows GitHub + deploy options.
+
+    Mirrors _preview_keyboard so the user can publish from either state
+    without first having to tap 'Готово'.
+    """
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="✅ Готово", callback_data=CB_DONE),
                 InlineKeyboardButton(text="🕒 Версии", callback_data=CB_VERSIONS),
             ],
-            [InlineKeyboardButton(text="🗑 Удалить", callback_data=CB_DELETE)],
+            [
+                InlineKeyboardButton(text="🐙 GitHub", callback_data=CB_GITHUB),
+                InlineKeyboardButton(text="🌐 Pages", callback_data=CB_PAGES),
+            ],
+            [
+                InlineKeyboardButton(text="📦 Скачать код", callback_data=CB_DOWNLOAD),
+                InlineKeyboardButton(text="🗑 Удалить", callback_data=CB_DELETE),
+            ],
             [InlineKeyboardButton(text="📋 В меню", callback_data=CB_MENU)],
         ]
     )
@@ -669,7 +680,36 @@ async def _apply_user_edit(message: Message, state: FSMContext) -> None:
         await state.clear()
         return
 
-    thinking = await message.answer(f"✏️ <b>Применяю:</b> <i>{instruction[:200]}</i>")
+    # ONE message: scene + caption "Применяю..." → edit_text до "Готово"
+    # Используем preview_message_id из state (тот же что preview/edit) —
+    # если есть, редактируем его caption; иначе шлём новое.
+    from bot.handlers.common import _send_scene_with_text
+
+    state_data = await state.get_data()
+    preview_msg_id = state_data.get("preview_message_id")
+    initial_caption = (
+        f"✏️ <b>Применяю:</b> <i>{instruction[:200]}</i>\n\n"
+        f"🧠 Агент читает сайт и вносит правки…"
+    )
+
+    if preview_msg_id is not None and message.chat is not None:
+        # Редактируем caption того же scene-сообщения
+        try:
+            thinking = await message.bot.edit_message_caption(
+                chat_id=message.chat.id,
+                message_id=preview_msg_id,
+                caption=initial_caption,
+                parse_mode="HTML",
+            )
+        except Exception:  # noqa: BLE001
+            thinking = await _send_scene_with_text(
+                message, "edit", initial_caption, reply_markup=None
+            )
+    else:
+        # Fallback: новое сообщение со scene image + caption
+        thinking = await _send_scene_with_text(
+            message, "edit", initial_caption, reply_markup=None
+        )
 
     try:
         edit = await apply_edit(current_files, instruction)
