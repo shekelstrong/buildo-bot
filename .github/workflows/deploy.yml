@@ -27,9 +27,8 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           command_timeout: 10m
-          envs: REPO_NAME
-          REPO_NAME=buildo-bot
-          script: |
+                    script: |
+            REPO_NAME="buildo-bot"
             REPO_DIR="${{ secrets.VPS_DEPLOY_DIR }}/${REPO_NAME}"
             mkdir -p "$REPO_DIR"
             if [ ! -d "$REPO_DIR/.git" ]; then
