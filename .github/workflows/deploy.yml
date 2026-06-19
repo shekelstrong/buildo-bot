@@ -28,17 +28,35 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           command_timeout: 10m
           script: |
+            set -e
             REPO_NAME="buildo-bot"
             REPO_DIR="${{ secrets.VPS_DEPLOY_DIR }}/${REPO_NAME}"
+
             mkdir -p "$REPO_DIR"
             if [ ! -d "$REPO_DIR/.git" ]; then
               rm -rf "$REPO_DIR"
               git clone "https://github.com/shekelstrong/${REPO_NAME}.git" "$REPO_DIR"
             fi
             cd "$REPO_DIR"
+
+            # CRITICAL: back up .env BEFORE git clean, restore AFTER
+            if [ -f ".env" ]; then
+              cp .env /tmp/${REPO_NAME}.env.bak
+            fi
+
             git fetch origin main
             git reset --hard origin/main
             git clean -fd
+
+            # Restore .env
+            if [ -f /tmp/${REPO_NAME}.env.bak ]; then
+              cp /tmp/${REPO_NAME}.env.bak .env
+              chmod 600 .env
+              echo "✅ .env restored from backup"
+            else
+              echo "::warning::No .env backup found — service may not start"
+            fi
+
             docker compose down --remove-orphans || true
             docker compose up -d --build
             sleep 10
